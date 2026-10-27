@@ -1,6 +1,6 @@
 # DJ audio controller (Python prototype)
 
-This is a single-deck desktop prototype for `dj_controller_firmware`: load and play an audio file, display its waveform and playhead, control volume/speed/three-band EQ with five sliders, and experimentally use motor angle feedback to jog the playhead. It is an approximation of the interaction visible in the supplied video; it is not a complete DJ application or a low-latency scratch engine. No live hardware/audio device verification has been performed yet.
+This is a single-deck desktop prototype for `dj_controller_firmware`: load and play an audio file, display its waveform and playhead, control volume/speed/three-band EQ with five sliders, and experimentally use motor angle feedback to jog the playhead. It is an approximation of the interaction visible in the supplied video; it is not a complete DJ application or a low-latency scratch engine. The user has observed live motor CAN feedback; the updated motor speed commands and complete audio setup still require hardware verification.
 
 ## Run on Windows
 
@@ -26,7 +26,9 @@ On small or high-DPI displays, use the right and bottom scrollbars to reach all 
 
 The EQ uses simple first-order 250 Hz / 4 kHz crossover filters, with each band adjustable from -12 to +6 dB. Approximately 2/3 of each slider gives 0 dB. This is a basic effect, not a reproduction of a commercial mixer's EQ. The five ranges default to 0–3.3 V. Edit `self.calibration` in `app.py` using each measured minimum and maximum (microvolts). A nonlinear/logarithmic potentiometer requires a measured mapping curve; endpoints alone do not make it linear. Disabled/failed ADC inputs stay unchanged in the GUI.
 
-Motor feedback is optional; the firmware defaults to the confirmed SimpleFOC protocol and assumes ID `M`. Click ENABLE FEEDBACK to request monitoring, then check the motor is online before using jog or Arm. The jog checkbox makes angle changes move the playhead. This is a coarse seek gesture based on periodic CAN feedback, not vinyl scratch: it has no platter touch sensor or velocity-based audio scrubbing. The controller sends no drive voltage until ARM is pressed; the motor's own firmware may still enable itself on power-up. The q-axis control is an experimental voltage command, not speed control. Use STOP when finished. Read the firmware safety and protocol notes before connecting a motor.
+Motor feedback is optional; the firmware defaults to the SimpleFOC protocol and assumes ID `M`. Click ENABLE FEEDBACK to request monitoring and confirm the motor is online. Set TARGET SPEED (default +1 rad/s, range ±10 rad/s) and click START to request velocity mode; the app repeatedly sends the selected speed as a heartbeat. Click STOP to request a zero target and motor disable. These new commands have not yet been verified on the actual motor. Test unloaded with an independent way to disconnect motor power; the motor's own firmware may enable itself at power-up, and CAN faults may prevent STOP reaching it.
+
+For manual jog seek, stop the motor first, then check “Use motor for jog seek”. START disables jog so powered rotation is not interpreted as manual movement. Jog remains a coarse seek based on periodic feedback, without a touch sensor or velocity-based scratch audio. The GUI speed control targets SimpleFOC only; the optional F103 reference protocol uses a separate `VQ` millivolt command and is not driven by this slider. Read the firmware protocol and safety notes before connecting a motor.
 
 ## Design and future work
 

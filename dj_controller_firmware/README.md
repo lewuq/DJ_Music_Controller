@@ -1,6 +1,6 @@
 # XIAO DJ controller firmware
 
-Zephyr / PlatformIO firmware for two ADS1115 ADCs and one CAN motor. It sends versioned JSON lines over USB CDC to the companion `dj_audio_controller` application. This is a prototype: it has not yet been verified with the motor or the complete hardware setup.
+Zephyr / PlatformIO firmware for two ADS1115 ADCs and one CAN motor. It sends versioned JSON lines over USB CDC to the companion `dj_audio_controller` application. This is a prototype: the user has observed motor feedback over CAN, but the new speed commands and complete hardware setup have not yet been verified on the motor.
 
 ## Wiring
 
@@ -34,11 +34,13 @@ At approximately 20 Hz, CDC emits one line like:
 
 Array order is M1 A0–A3 then M2 A0–A3. `null` means disabled or read failed; it must not be treated as 0 V. Motor `online` requires recent matching CAN feedback. The USB CDC port is a **custom serial device**, not a USB MIDI/HID device.
 
-Incoming newline-terminated commands: `MONITOR`, `ARM`, `VQ <signed millivolts>`, `STOP`. For SimpleFOC, `MONITOR` sends `MG7` to enable monitoring; use the GUI's Enable feedback button. `ARM` requires selected protocol, successful CAN init and recent feedback; default maximum is ±300 mV. Send `VQ` repeatedly while armed; after 300 ms without it, stale feedback, or a send error, the firmware attempts zero output and disarms. SimpleFOC additionally attempts `E0`; the F103 reference code itself sets its target to zero after 500 ms without CAN. These are software safeguards, not a substitute for a power disconnect; loss of CAN may prevent a stop frame from reaching the motor. The GUI starts disarmed and only transmits ARM on the button press. The motor manual says its own firmware may enable the motor on power-up, so controller disarmed does not prove motor power output is off.
+Incoming newline-terminated USB commands are `MONITOR`, `ARM`, `STOP`, and a protocol-specific target. For SimpleFOC, `MONITOR` sends `MG7` to enable feedback. Once recent feedback is available and CAN is healthy, `ARM` sends a zero target, `C1` (velocity mode), and `E1` (enable). Then send `SPEED <signed integer>` repeatedly; its unit is milliradians per second, so `SPEED 1000` requests 1 rad/s. The default limit is ±10000 mrad/s (±10 rad/s). The desktop app sends `SPEED` repeatedly as a heartbeat. For `MOTOR_PROTOCOL_F103_SOURCE`, `VQ <signed integer>` instead sets q-axis voltage in millivolts, limited by default to ±300 mV; this protocol is not controlled by the desktop speed slider.
+
+If the target heartbeat or feedback is older than 300 ms, or sending fails, the controller attempts to zero the target and disarm. SimpleFOC additionally attempts `E0`; the F103 reference code itself sets its target to zero after 500 ms without CAN. `STOP` requests zero and, for SimpleFOC, `E0`. A CAN failure can prevent these frames from reaching the motor; the timeout is not a substitute for an independent power disconnect. The motor may already be enabled in its own firmware at power-up, so the local `armed` flag is not proof of the motor's actual output state. The new command path, zero-padded frames and stop behavior still require hardware verification.
 
 On CAN send failure or timeout the controller attempts to stop the CAN peripheral and latches the fault until reset; if stopping the peripheral fails, cancellation of queued frames is not guaranteed. ADC sampling, command handling and the watchdog currently share a thread, so bus or ADC stalls can delay timeout handling: 300 ms is not a hard real-time safety shutdown. The `MG7` command, frame padding and stop behavior must be verified on the actual motor.
 
-The source is split into `adc_inputs.c`, `motor.c`, and `main.c`; the latter implements the CDC line interface and loop. Test one motor without a load first, confirm feedback and direction, and verify the voltage limit and stop behavior before attaching a platter.
+The source is split into `adc_inputs.c`, `motor.c`, and `main.c`; the latter implements the CDC line interface and loop. Test one motor without a load first, confirm feedback, speed, direction and stopping before attaching a platter. The SimpleFOC speed limit is not a current or voltage limit; configure and verify those limits on the motor itself.
 
 ## Roadmap
 

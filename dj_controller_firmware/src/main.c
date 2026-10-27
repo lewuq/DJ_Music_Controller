@@ -10,7 +10,7 @@
 
 static const struct device *const console = DEVICE_DT_GET(DT_CHOSEN(zephyr_console));
 
-/* CDC line protocol: ARM, STOP, or VQ <signed millivolts>. */
+/* CDC line protocol: MONITOR, ARM, STOP, SPEED <mrad/s>, or VQ <mV>. */
 static void poll_commands(void)
 {
     static char line[40];

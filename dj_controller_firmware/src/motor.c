@@ -22,7 +22,8 @@ static int64_t feedback_time = -100000;
 static int64_t command_time;
 static bool armed;
 static bool can_started;
-static int target_mv, last_error;
+/* The target is mrad/s for SimpleFOC and mV for the F103 source protocol. */
+static int target_milli, last_error;
 K_SEM_DEFINE(tx_slot, 1, 1);
 K_SEM_DEFINE(tx_done, 0, 1);
 static int tx_result;
@@ -43,7 +44,7 @@ static int latch_can_fault(int error)
         (void)can_stop(canbus);
     }
     armed = false;
-    target_mv = 0;
+    target_milli = 0;
     last_error = error;
     return error;
 }
@@ -96,22 +97,23 @@ static int send_text(const char *text)
     memcpy(data, text, length);
     return send_frame(MOTOR_SIMPLEFOC_ID, data, sizeof(data));
 }
-static int send_voltage(int mv)
+static int send_target(int target)
 {
-    if (mv < -MOTOR_MAX_MV || mv > MOTOR_MAX_MV) return -ERANGE;
 #if MOTOR_PROTOCOL == MOTOR_PROTOCOL_F103_SOURCE
+    if (target < -MOTOR_MAX_MV || target > MOTOR_MAX_MV) return -ERANGE;
     uint8_t data[8] = {0};
     int index = (MOTOR_SOURCE_ID - 1) % 4;
-    sys_put_le16((uint16_t)(int16_t)mv, &data[index * 2]);
+    sys_put_le16((uint16_t)(int16_t)target, &data[index * 2]);
     /* The protocol transmits ALL four slots: other motors in this group get 0. */
     return send_frame(MOTOR_SOURCE_ID <= 4 ? 0x100 : 0x200, data, 8);
 #elif MOTOR_PROTOCOL == MOTOR_PROTOCOL_SIMPLEFOC
+    if (target < -MOTOR_MAX_SPEED_MRAD_S || target > MOTOR_MAX_SPEED_MRAD_S) return -ERANGE;
     char text[16];
-    int magnitude = mv < 0 ? -mv : mv;
-    snprintk(text, sizeof(text), "%s%d.%03d", mv < 0 ? "-" : "", magnitude / 1000, magnitude % 1000);
+    int magnitude = target < 0 ? -target : target;
+    snprintk(text, sizeof(text), "%s%d.%03d", target < 0 ? "-" : "", magnitude / 1000, magnitude % 1000);
     return send_text(text);
 #else
-    ARG_UNUSED(mv); return -ENOTSUP;
+    ARG_UNUSED(target); return -ENOTSUP;
 #endif
 }
 void motor_init(void)
@@ -143,13 +145,13 @@ struct motor_status motor_get_status(void)
 static void stop_motor(void)
 {
     int previous_error = last_error;
-    int stop_error = armed ? send_voltage(0) : 0;
+    int stop_error = armed ? send_target(0) : 0;
     last_error = previous_error ? previous_error : stop_error;
 #if MOTOR_PROTOCOL == MOTOR_PROTOCOL_SIMPLEFOC
     /* The motor itself may have started enabled even if this host never armed. */
     if (can_started) { int err = send_text("E0"); if (err) last_error = err; }
 #endif
-    armed = false; target_mv = 0;
+    armed = false; target_milli = 0;
 }
 void motor_command(const char *line)
 {
@@ -162,19 +164,28 @@ void motor_command(const char *line)
         if (MOTOR_PROTOCOL == MOTOR_PROTOCOL_DISABLED || !motor_get_status().online || last_error) return;
 #if MOTOR_PROTOCOL == MOTOR_PROTOCOL_SIMPLEFOC
         /* Mode switch and enable are only sent on an explicit host command. */
-        last_error = send_voltage(0);
-        if (!last_error) last_error = send_text("C0");
+        last_error = send_target(0);
+        if (!last_error) last_error = send_text("C1");
         if (!last_error) last_error = send_text("E1");
         if (last_error) { send_text("E0"); return; }
 #endif
-        armed = true; target_mv = 0; command_time = k_uptime_get(); return;
+        armed = true; target_milli = 0; command_time = k_uptime_get(); return;
     }
+#if MOTOR_PROTOCOL == MOTOR_PROTOCOL_F103_SOURCE
     if (!strncmp(line, "VQ ", 3) && armed) {
         char *end;
         long value = strtol(line + 3, &end, 10);
         if (*end || end == line + 3 || value < -MOTOR_MAX_MV || value > MOTOR_MAX_MV) return;
-        target_mv = (int)value; command_time = k_uptime_get();
+        target_milli = (int)value; command_time = k_uptime_get();
     }
+#elif MOTOR_PROTOCOL == MOTOR_PROTOCOL_SIMPLEFOC
+    if (!strncmp(line, "SPEED ", 6) && armed) {
+        char *end;
+        long value = strtol(line + 6, &end, 10);
+        if (*end || end == line + 6 || value < -MOTOR_MAX_SPEED_MRAD_S || value > MOTOR_MAX_SPEED_MRAD_S) return;
+        target_milli = (int)value; command_time = k_uptime_get();
+    }
+#endif
 }
 void motor_tick(void)
 {
@@ -182,6 +193,6 @@ void motor_tick(void)
     if (!motor_get_status().online || k_uptime_get() - command_time > MOTOR_COMMAND_TIMEOUT_MS) {
         stop_motor(); return;
     }
-    last_error = send_voltage(target_mv);
+    last_error = send_target(target_milli);
     if (last_error) stop_motor();
 }

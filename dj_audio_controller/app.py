@@ -116,8 +116,8 @@ class Fader(tk.Frame):
                 self.detail.config(text="EQ GAIN")
 
 
-class VoltageSlider(tk.Canvas):
-    """Keyboard-accessible +/-300 mV control bound to the real motor command."""
+class SpeedSlider(tk.Canvas):
+    """Keyboard-accessible target speed in milliradians per second."""
     def __init__(self, parent, variable):
         super().__init__(parent, bg=PANEL, height=35, highlightthickness=0,
                          cursor="hand2", takefocus=True)
@@ -125,24 +125,24 @@ class VoltageSlider(tk.Canvas):
         self.bind("<Configure>", lambda _: self.draw())
         self.bind("<Button-1>", self.move)
         self.bind("<B1-Motion>", self.move)
-        self.bind("<Left>", lambda _: self.nudge(-10))
-        self.bind("<Right>", lambda _: self.nudge(10))
+        self.bind("<Left>", lambda _: self.nudge(-100))
+        self.bind("<Right>", lambda _: self.nudge(100))
         variable.trace_add("write", lambda *_: self.draw())
 
     def nudge(self, amount):
-        self.variable.set(max(-300, min(300, self.variable.get() + amount)))
+        self.variable.set(max(-10000, min(10000, self.variable.get() + amount)))
         return "break"
 
     def move(self, event):
         self.focus_set()
         width = max(self.winfo_width() - 24, 1)
         fraction = max(0.0, min(1.0, (event.x - 12) / width))
-        self.variable.set(round((-300 + 600 * fraction) / 10) * 10)
+        self.variable.set(round((-10000 + 20000 * fraction) / 100) * 100)
 
     def draw(self):
         self.delete("all")
         width = max(self.winfo_width(), 40)
-        x = 12 + (width - 24) * (self.variable.get() + 300) / 600
+        x = 12 + (width - 24) * (self.variable.get() + 10000) / 20000
         self.create_line(12, 17, width - 12, 17, fill="#31454e", width=5, capstyle="round")
         self.create_line(width / 2, 9, width / 2, 25, fill="#78918c")
         self.create_oval(x - 7, 10, x + 7, 24, fill=GOLD, outline=GOLD)
@@ -165,7 +165,9 @@ class App(tk.Tk):
         self.hardware = tk.BooleanVar(value=True)
         self.jog_enabled = tk.BooleanVar(value=False)
         self.motor_armed_request = False
-        self.motor_mv = tk.IntVar(value=0)
+        self.motor_arm_confirmed = False
+        self.motor_arm_deadline = 0.0
+        self.motor_speed = tk.IntVar(value=1000)
         self.motor_text = tk.StringVar(value="Feedback offline · output not confirmed")
         self.status = tk.StringVar(value="USB DISCONNECTED")
         self.track = tk.StringVar(value="NO TRACK LOADED")
@@ -306,16 +308,16 @@ class App(tk.Tk):
         tk.Frame(motor, bg=LINE, height=1).pack(fill="x", padx=14, pady=11)
         button(motor, "ENABLE FEEDBACK", self.enable_feedback).pack(fill="x", padx=14)
         motor_row = tk.Frame(motor, bg=PANEL); motor_row.pack(fill="x", padx=14, pady=(7, 0))
-        button(motor_row, "ARM", self.arm_motor, padx=5).pack(side="left", fill="x", expand=True)
+        button(motor_row, "START", self.arm_motor, padx=5).pack(side="left", fill="x", expand=True)
         button(motor_row, "STOP", self.stop_motor, danger=True, padx=5).pack(side="left", fill="x", expand=True, padx=(7, 0))
-        voltage = tk.Frame(motor, bg=PANEL); voltage.pack(fill="x", padx=14, pady=(10, 0))
-        label(voltage, "Q-AXIS VOLTAGE", size=8, color=MUTED, font=(MONO, 8)).pack(side="left")
-        self.voltage_text = label(voltage, "0 mV", size=9, color=GOLD, font=(MONO, 9, "bold"))
-        self.voltage_text.pack(side="right")
-        self.motor_mv.trace_add("write", lambda *_: self.voltage_text.config(text=f"{self.motor_mv.get():+d} mV"))
-        self.voltage_slider = VoltageSlider(motor, self.motor_mv)
-        self.voltage_slider.pack(fill="x", padx=12)
-        label(motor, "±300 mV  /  EXPERIMENTAL", size=8, color=DIM, font=(MONO, 8)).pack(anchor="w", padx=14, pady=(0, 10))
+        speed = tk.Frame(motor, bg=PANEL); speed.pack(fill="x", padx=14, pady=(10, 0))
+        label(speed, "TARGET SPEED", size=8, color=MUTED, font=(MONO, 8)).pack(side="left")
+        self.speed_text = label(speed, "+1.0 rad/s", size=9, color=GOLD, font=(MONO, 9, "bold"))
+        self.speed_text.pack(side="right")
+        self.motor_speed.trace_add("write", lambda *_: self.speed_text.config(text=f"{self.motor_speed.get() / 1000:+.1f} rad/s"))
+        self.speed_slider = SpeedSlider(motor, self.motor_speed)
+        self.speed_slider.pack(fill="x", padx=12)
+        label(motor, "±10 rad/s  /  SIMPLEFOC", size=8, color=DIM, font=(MONO, 8)).pack(anchor="w", padx=14, pady=(0, 10))
 
     def _viewport_resize(self, event):
         self._viewport_bounds()
@@ -356,6 +358,7 @@ class App(tk.Tk):
         self.motor_online = False
         self.last_telemetry = 0.0
         self.motor_armed_request = False
+        self.motor_arm_confirmed = False
         self.last_angle = None
         self.motor_text.set("Feedback offline · output not confirmed")
         try:
@@ -386,6 +389,9 @@ class App(tk.Tk):
         self.engine.set_controls([v.get() for v in self.values])
 
     def reset_angle(self):
+        if self.jog_enabled.get() and self.motor_armed_request:
+            self.jog_enabled.set(False)
+            self.motor_text.set("Stop motor before enabling manual jog")
         self.last_angle = None
 
     def arm_motor(self):
@@ -393,9 +399,13 @@ class App(tk.Tk):
             self.motor_text.set("Feedback unavailable · cannot arm")
             return
         try:
-            self.motor_mv.set(0)
+            # Normal motor rotation must not be interpreted as a jog gesture.
+            self.jog_enabled.set(False)
+            self.reset_angle()
             self.link.send("ARM")
             self.motor_armed_request = True
+            self.motor_arm_confirmed = False
+            self.motor_arm_deadline = time.monotonic() + 1.0
         except Exception as exc:
             self.motor_armed_request = False
             self.motor_text.set("Motor command failed: " + str(exc))
@@ -411,7 +421,7 @@ class App(tk.Tk):
 
     def stop_motor(self):
         self.motor_armed_request = False
-        self.motor_mv.set(0)
+        self.motor_arm_confirmed = False
         if self.link:
             try:
                 self.link.send("STOP")
@@ -432,9 +442,17 @@ class App(tk.Tk):
         motor = message["motor"]
         self.motor_online = bool(motor.get("online"))
         self.motor_text.set(f"{'ONLINE' if self.motor_online else 'OFFLINE'}  /  "
-                            f"{'ARMED' if motor.get('armed') else 'DISARMED'}\nCAN error: {motor.get('error', 0)}")
+                            f"{'ARMED' if motor.get('armed') else 'DISARMED'}\n"
+                            f"Feedback: {motor.get('rpm10', 0) / 10:.1f} rpm\nCAN error: {motor.get('error', 0)}")
         if not self.motor_online:
             self.motor_armed_request = False
+            self.motor_arm_confirmed = False
+        elif self.motor_armed_request and motor.get("armed"):
+            self.motor_arm_confirmed = True
+        elif self.motor_armed_request and self.motor_arm_confirmed:
+            # A watchdog stop or CAN fault needs a fresh explicit START.
+            self.motor_armed_request = False
+            self.motor_arm_confirmed = False
         if self.jog_enabled.get() and motor.get("online"):
             angle = motor.get("angle_mrad", 0) / 1000.0
             if self.last_angle is not None:
@@ -451,6 +469,7 @@ class App(tk.Tk):
                 self.status.set("USB DISCONNECTED")
                 self.motor_online = False
                 self.motor_armed_request = False
+                self.motor_arm_confirmed = False
                 self.last_angle = None
                 self.motor_text.set("Feedback offline · serial disconnected")
             else:
@@ -464,14 +483,24 @@ class App(tk.Tk):
             if self.last_telemetry and time.monotonic() - self.last_telemetry > 1.0:
                 self.motor_online = False
                 self.motor_armed_request = False
+                self.motor_arm_confirmed = False
                 self.last_angle = None
                 self.motor_text.set("Feedback offline · telemetry stale")
             if self.motor_armed_request:
-                try:
-                    self.link.send(f"VQ {self.motor_mv.get()}")
-                except Exception:
+                if not self.motor_arm_confirmed and time.monotonic() > self.motor_arm_deadline:
                     self.motor_armed_request = False
-                    self.status.set("MOTOR COMMAND FAILED")
+                    self.motor_text.set("Start not confirmed · check CAN and firmware")
+                    try:
+                        self.link.send("STOP")
+                    except Exception:
+                        self.status.set("MOTOR COMMAND FAILED")
+                else:
+                    try:
+                        self.link.send(f"SPEED {self.motor_speed.get()}")
+                    except Exception:
+                        self.motor_armed_request = False
+                        self.motor_arm_confirmed = False
+                        self.status.set("MOTOR COMMAND FAILED")
         connected = self.link is not None and not self.link.stop_event.is_set()
         self.header_status.config(fg=MINT if connected else MUTED)
         self.device_status.config(fg=MINT if connected else MUTED)
