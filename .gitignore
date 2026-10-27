@@ -1,0 +1,24 @@
+# PlatformIO and native build products
+.pio/
+build/
+dist/
+*.elf
+*.bin
+*.hex
+*.uf2
+*.o
+*.obj
+*.log
+
+# Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local editor and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,1 @@
+/* The board DTS already configures I2C1 and FDCAN2, including CAN standby. */
