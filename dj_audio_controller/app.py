@@ -1,12 +1,13 @@
 """Single-deck DJ console using Tkinter, PortAudio and USB CDC telemetry."""
-import math
 import os
+import math
 import queue
 import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 import numpy as np
+import sounddevice as sd
 from serial.tools import list_ports
 
 from audio_engine import AudioEngine
@@ -110,7 +111,7 @@ class Fader(tk.Frame):
                 self.detail.config(text="OUTPUT LEVEL")
             elif self.index == 1:
                 self.readout.config(text=f"{0.5 + value:.2f}x")
-                self.detail.config(text="PLAYBACK RATE")
+                self.detail.config(text="RATE MULTIPLIER")
             else:
                 self.readout.config(text=f"{-12 + 18 * value:+.1f} dB")
                 self.detail.config(text="EQ GAIN")
@@ -158,16 +159,17 @@ class App(tk.Tk):
         self.engine = AudioEngine()
         self.link = None
         self.wave = None
-        self.last_angle = None
+        self.recent_tracks = []
+        self.cue_fraction = 0.0
+        self.motor_angle = 0.0
+        self.motor_rpm = 0.0
         self.motor_online = False
         self.last_telemetry = 0.0
         self.calibration = [(0, 3300000)] * 5  # per-channel measured voltage endpoints, µV
+        self.slider_inverted = [True] * 5  # Change individual entries if wiring differs.
+        self.output_ids = [None]
         self.hardware = tk.BooleanVar(value=True)
         self.jog_enabled = tk.BooleanVar(value=False)
-        self.motor_armed_request = False
-        self.motor_arm_confirmed = False
-        self.motor_arm_deadline = 0.0
-        self.motor_speed = tk.IntVar(value=1000)
         self.motor_text = tk.StringVar(value="Feedback offline · output not confirmed")
         self.status = tk.StringVar(value="USB DISCONNECTED")
         self.track = tk.StringVar(value="NO TRACK LOADED")
@@ -256,14 +258,46 @@ class App(tk.Tk):
         self.subline.grid(row=1, column=0, sticky="w", pady=(2, 0))
         self.total_label = label(info, "/ 00:00", size=9, color=MUTED, font=(MONO, 9))
         self.total_label.grid(row=1, column=1, sticky="e")
-        self.canvas = tk.Canvas(deck, height=142, bg=PANEL_DEEP, highlightthickness=0, cursor="hand2")
+        performance = tk.Frame(deck, bg=PANEL)
+        performance.pack(fill="x", padx=18, pady=(6, 0))
+        self.platter = tk.Canvas(performance, width=140, height=140, bg=PANEL_DEEP,
+                                 highlightthickness=0)
+        self.platter.pack(side="left", padx=(0, 12))
+        facts = tk.Frame(performance, bg=PANEL)
+        facts.pack(side="left", fill="both", expand=True)
+        label(facts, "MOTOR / TRANSPORT", size=8, color=DIM, font=(MONO, 8)).pack(anchor="w")
+        self.rpm_label = label(facts, "--.- RPM", size=21, color=MINT,
+                               font=(MONO, 21, "bold"), anchor="w")
+        self.rpm_label.pack(fill="x", pady=(4, 0))
+        self.rate_label = label(facts, "PLAY RATE  1.00x", size=10, color=TEXT,
+                                font=(MONO, 10), anchor="w")
+        self.rate_label.pack(fill="x", pady=(4, 0))
+        self.cue_label = label(facts, "CUE  00:00", size=9, color=GOLD,
+                               font=(MONO, 9), anchor="w")
+        self.cue_label.pack(fill="x", pady=(4, 0))
+        meter_box = tk.Frame(performance, bg=PANEL)
+        meter_box.pack(side="right", padx=(12, 0))
+        label(meter_box, "MASTER", size=8, color=DIM, font=(MONO, 8)).pack(anchor="center")
+        self.meter = tk.Canvas(meter_box, width=92, height=115, bg=PANEL_DEEP, highlightthickness=0)
+        self.meter.pack()
+        self.meter_status = label(meter_box, "L  /  R", size=8, color=MUTED, font=(MONO, 8))
+        self.meter_status.pack()
+
+        wave_head = tk.Frame(deck, bg=PANEL); wave_head.pack(fill="x", padx=18, pady=(12, 0))
+        label(wave_head, "TRACK OVERVIEW", size=8, color=MUTED, font=(MONO, 8)).pack(side="left")
+        self.remaining_label = label(wave_head, "REMAINING  --:--", size=8, color=MUTED, font=(MONO, 8))
+        self.remaining_label.pack(side="right")
+        self.canvas = tk.Canvas(deck, height=110, bg=PANEL_DEEP, highlightthickness=0, cursor="hand2")
         self.canvas.pack(fill="both", expand=True, padx=18, pady=(10, 4))
         self.canvas.bind("<Button-1>", self.seek)
         footer = tk.Frame(deck, bg=PANEL); footer.pack(fill="x", padx=18, pady=(6, 14))
         button(footer, "LOAD TRACK", self.load).pack(side="left")
         self.play_button = button(footer, "PLAY  >", self.play, accent=True)
         self.play_button.pack(side="left", padx=(7, 0))
-        label(footer, "CLICK WAVEFORM TO SEEK", size=8, color=DIM, font=(MONO, 8)).pack(side="right")
+        button(footer, "−5s", lambda: self.seek_relative(-5), padx=9).pack(side="left", padx=(7, 0))
+        button(footer, "+5s", lambda: self.seek_relative(5), padx=9).pack(side="left", padx=(5, 0))
+        button(footer, "SET CUE", self.set_cue, padx=9).pack(side="left", padx=(7, 0))
+        button(footer, "GO CUE", self.go_cue, padx=9).pack(side="left", padx=(5, 0))
 
         strip_header = tk.Frame(left, bg=BG); strip_header.pack(fill="x", pady=(16, 7))
         label(strip_header, "MIXER CONTROLS", size=10, weight="bold").pack(side="left")
@@ -277,6 +311,17 @@ class App(tk.Tk):
             fader = Fader(strips, name, channel, self.values[i], self.manual_change, i)
             fader.grid(row=0, column=i, sticky="nsew", padx=(0 if i == 0 else 4, 0 if i == 4 else 4))
             self.faders.append(fader)
+
+        library = tk.Frame(left, bg=PANEL, highlightbackground=LINE, highlightthickness=1)
+        library.pack(fill="x", pady=(16, 0))
+        library_header = tk.Frame(library, bg=PANEL); library_header.pack(fill="x", padx=14, pady=(10, 3))
+        label(library_header, "RECENT TRACKS", size=9, weight="bold").pack(side="left")
+        label(library_header, "DOUBLE-CLICK TO LOAD", size=8, color=DIM, font=(MONO, 8)).pack(side="right")
+        self.library_list = tk.Listbox(library, height=3, bg=PANEL_DEEP, fg=TEXT,
+                                       selectbackground="#31544e", selectforeground=TEXT,
+                                       relief="flat", borderwidth=0, font=(FONT, 9), activestyle="none")
+        self.library_list.pack(fill="x", padx=14, pady=(0, 12))
+        self.library_list.bind("<Double-Button-1>", self.load_recent)
 
         device = tk.Frame(right, bg=PANEL, highlightbackground=LINE, highlightthickness=1)
         device.pack(fill="x")
@@ -295,29 +340,27 @@ class App(tk.Tk):
         self.device_status.pack(fill="x", padx=14, pady=(0, 6))
         self._check(device, "Use hardware sliders", self.hardware).pack(fill="x", padx=10, pady=(0, 10))
 
+        audio = tk.Frame(right, bg=PANEL, highlightbackground=LINE, highlightthickness=1)
+        audio.pack(fill="x", pady=(12, 0))
+        label(audio, "AUDIO OUTPUT", size=10, weight="bold").pack(anchor="w", padx=14, pady=(12, 5))
+        audio_row = tk.Frame(audio, bg=PANEL); audio_row.pack(fill="x", padx=14, pady=(0, 12))
+        self.output = ttk.Combobox(audio_row, state="readonly", style="Console.TCombobox", width=12)
+        self.output.pack(side="left", fill="x", expand=True)
+        self.output.bind("<<ComboboxSelected>>", self.select_output)
+        button(audio_row, "↻", self.refresh_outputs, width=2, padx=5, pady=5).pack(side="left", padx=(6, 0))
+        self.refresh_outputs()
+
         motor = tk.Frame(right, bg=PANEL, highlightbackground=LINE, highlightthickness=1)
         motor.pack(fill="both", expand=True, pady=(12, 0))
         top = tk.Frame(motor, bg=PANEL); top.pack(fill="x", padx=14, pady=(14, 6))
-        label(top, "MOTOR / JOG", size=10, weight="bold").pack(side="left")
+        label(top, "MOTOR / FEEDBACK", size=10, weight="bold").pack(side="left")
         label(top, "CAN", size=8, color=MUTED, font=(MONO, 8)).pack(side="right")
         self.motor_status = label(motor, textvariable=self.motor_text, size=9, color=MUTED,
                                   anchor="w", justify="left", wraplength=238)
         self.motor_status.pack(fill="x", padx=14, pady=(0, 5))
-        self._check(motor, "Use motor for jog seek", self.jog_enabled, self.reset_angle).pack(fill="x", padx=10)
-        label(motor, "EXPERIMENTAL POSITION SEEK", size=8, color=DIM, font=(MONO, 8)).pack(anchor="w", padx=14)
-        tk.Frame(motor, bg=LINE, height=1).pack(fill="x", padx=14, pady=11)
-        button(motor, "ENABLE FEEDBACK", self.enable_feedback).pack(fill="x", padx=14)
-        motor_row = tk.Frame(motor, bg=PANEL); motor_row.pack(fill="x", padx=14, pady=(7, 0))
-        button(motor_row, "START", self.arm_motor, padx=5).pack(side="left", fill="x", expand=True)
-        button(motor_row, "STOP", self.stop_motor, danger=True, padx=5).pack(side="left", fill="x", expand=True, padx=(7, 0))
-        speed = tk.Frame(motor, bg=PANEL); speed.pack(fill="x", padx=14, pady=(10, 0))
-        label(speed, "TARGET SPEED", size=8, color=MUTED, font=(MONO, 8)).pack(side="left")
-        self.speed_text = label(speed, "+1.0 rad/s", size=9, color=GOLD, font=(MONO, 9, "bold"))
-        self.speed_text.pack(side="right")
-        self.motor_speed.trace_add("write", lambda *_: self.speed_text.config(text=f"{self.motor_speed.get() / 1000:+.1f} rad/s"))
-        self.speed_slider = SpeedSlider(motor, self.motor_speed)
-        self.speed_slider.pack(fill="x", padx=12)
-        label(motor, "±10 rad/s  /  SIMPLEFOC", size=8, color=DIM, font=(MONO, 8)).pack(anchor="w", padx=14, pady=(0, 10))
+        self._check(motor, "Scratch with motor", self.jog_enabled, self.reset_angle).pack(fill="x", padx=10)
+        label(motor, "SPEED FADER ADJUSTS SCRATCH RATE", size=8, color=DIM,
+              font=(MONO, 8)).pack(anchor="w", padx=14, pady=(0, 10))
 
     def _viewport_resize(self, event):
         self._viewport_bounds()
@@ -350,83 +393,109 @@ class App(tk.Tk):
     def refresh_ports(self):
         self.port["values"] = self.ports()
 
-    def connect(self):
-        if self.link:
-            self.stop_motor()
-            self.link.close()
-            self.link = None
+    def refresh_outputs(self):
+        # PortAudio indices disambiguate devices with the same name / host API.
+        devices = sd.query_devices()
+        apis = sd.query_hostapis()
+        self.output_ids = [None]
+        labels = ["System default"]
+        for index, info in enumerate(devices):
+            if info["max_output_channels"] >= 2:
+                self.output_ids.append(index)
+                labels.append(f"{index}: {info['name']} ({apis[info['hostapi']]['name']})")
+        self.output["values"] = labels
+        selected = self.engine.output_device
+        if selected in self.output_ids:
+            self.output.current(self.output_ids.index(selected))
+        else:
+            self.output.set(f"Unavailable device {selected} — refresh or choose another")
+
+    def select_output(self, _event=None):
+        choice = self.output.current()
+        if choice < 0 or choice >= len(self.output_ids):
+            return
+        try:
+            self.engine.set_output_device(self.output_ids[choice])
+        except Exception as exc:
+            selected = self.engine.output_device
+            if selected in self.output_ids:
+                self.output.current(self.output_ids.index(selected))
+            messagebox.showerror("Audio output", f"Could not open output: {exc}")
+
+    def disconnect(self):
+        link, self.link = self.link, None
+        if link:
+            link.close()
         self.motor_online = False
         self.last_telemetry = 0.0
-        self.motor_armed_request = False
-        self.motor_arm_confirmed = False
-        self.last_angle = None
-        self.motor_text.set("Feedback offline · output not confirmed")
+        self.engine.set_scratch_velocity(0)
+        self.motor_text.set("Feedback offline · serial disconnected")
+        self.status.set("USB DISCONNECTED")
+        self.connect_button.config(text="CONNECT DEVICE")
+
+    def connect(self):
+        if self.link and not self.link.stop_event.is_set():
+            self.disconnect()
+            return
+        if self.link:
+            self.disconnect()
         try:
             self.link = SerialLink(self.port.get().strip())
             self.status.set("USB CONNECTED / " + self.port.get())
+            self.connect_button.config(text="DISCONNECT")
         except Exception as exc:
             self.status.set("USB DISCONNECTED")
+            self.connect_button.config(text="CONNECT DEVICE")
             messagebox.showerror("Serial connection", str(exc))
 
-    def load(self):
-        path = filedialog.askopenfilename(filetypes=[("Audio", "*.wav *.flac *.ogg"), ("All files", "*.*")])
+    def load(self, path=None):
+        path = path or filedialog.askopenfilename(filetypes=[("Audio", "*.wav *.flac *.ogg"), ("All files", "*.*")])
         if not path:
             return
         try:
             data, rate = self.engine.load(path)
             self.engine.start_stream()
             self.track.set(os.path.basename(path))
+            self.cue_fraction = 0.0
+            if path in self.recent_tracks:
+                self.recent_tracks.remove(path)
+            self.recent_tracks.insert(0, path)
+            self.recent_tracks = self.recent_tracks[:20]
+            self.library_list.delete(0, tk.END)
+            for track_path in self.recent_tracks:
+                self.library_list.insert(tk.END, os.path.basename(track_path))
             self.subline.config(text=f"{rate:,} HZ  /  {data.shape[1]} CH  /  {os.path.splitext(path)[1][1:].upper()}")
             mono = np.max(np.abs(data), axis=1)
             self.wave = np.array([np.max(chunk) for chunk in np.array_split(mono, min(len(mono), 700))])
         except Exception as exc:
             messagebox.showerror("Audio", str(exc))
 
+    def load_recent(self, _event=None):
+        selection = self.library_list.curselection()
+        if selection:
+            self.load(self.recent_tracks[selection[0]])
+
     def play(self):
         self.engine.toggle()
+
+    def seek_relative(self, seconds):
+        position, length, rate, _ = self.engine.snapshot()
+        if length:
+            self.engine.seek_fraction((position + seconds * rate) / max(1, length - 1))
+
+    def set_cue(self):
+        position, length, _, _ = self.engine.snapshot()
+        if length:
+            self.cue_fraction = position / max(1, length - 1)
+
+    def go_cue(self):
+        self.engine.seek_fraction(self.cue_fraction)
 
     def manual_change(self, _=None):
         self.engine.set_controls([v.get() for v in self.values])
 
     def reset_angle(self):
-        if self.jog_enabled.get() and self.motor_armed_request:
-            self.jog_enabled.set(False)
-            self.motor_text.set("Stop motor before enabling manual jog")
-        self.last_angle = None
-
-    def arm_motor(self):
-        if not self.link or not self.motor_online:
-            self.motor_text.set("Feedback unavailable · cannot arm")
-            return
-        try:
-            # Normal motor rotation must not be interpreted as a jog gesture.
-            self.jog_enabled.set(False)
-            self.reset_angle()
-            self.link.send("ARM")
-            self.motor_armed_request = True
-            self.motor_arm_confirmed = False
-            self.motor_arm_deadline = time.monotonic() + 1.0
-        except Exception as exc:
-            self.motor_armed_request = False
-            self.motor_text.set("Motor command failed: " + str(exc))
-
-    def enable_feedback(self):
-        if not self.link:
-            self.motor_text.set("Connect USB first")
-            return
-        try:
-            self.link.send("MONITOR")
-        except Exception as exc:
-            self.motor_text.set("Monitor command failed: " + str(exc))
-
-    def stop_motor(self):
-        self.motor_armed_request = False
-        self.motor_arm_confirmed = False
-        if self.link:
-            try:
-                self.link.send("STOP")
-            except Exception:
-                pass
+        self.engine.set_scratch_enabled(self.jog_enabled.get())
 
     def seek(self, event):
         self.engine.seek_fraction(event.x / max(self.canvas.winfo_width(), 1))
@@ -435,42 +504,28 @@ class App(tk.Tk):
         self.last_telemetry = time.monotonic()
         if self.hardware.get():
             for i, channel in enumerate(SLIDER_INDICES):
-                value = normalize(message["adc_uv"][channel], *self.calibration[i])
+                value = normalize(message["adc_uv"][channel], *self.calibration[i], inverted=self.slider_inverted[i])
                 if value is not None:
                     self.values[i].set(value)
             self.manual_change()
         motor = message["motor"]
         self.motor_online = bool(motor.get("online"))
+        if self.motor_online:
+            self.motor_rpm = float(motor.get("rpm10", 0)) / 10.0
+            self.motor_angle = float(motor.get("angle_mrad", 0)) / 1000.0
         self.motor_text.set(f"{'ONLINE' if self.motor_online else 'OFFLINE'}  /  "
-                            f"{'ARMED' if motor.get('armed') else 'DISARMED'}\n"
+                            f"{'LOCAL ARM ON' if motor.get('armed') else 'LOCAL ARM OFF'}\n"
                             f"Feedback: {motor.get('rpm10', 0) / 10:.1f} rpm\nCAN error: {motor.get('error', 0)}")
-        if not self.motor_online:
-            self.motor_armed_request = False
-            self.motor_arm_confirmed = False
-        elif self.motor_armed_request and motor.get("armed"):
-            self.motor_arm_confirmed = True
-        elif self.motor_armed_request and self.motor_arm_confirmed:
-            # A watchdog stop or CAN fault needs a fresh explicit START.
-            self.motor_armed_request = False
-            self.motor_arm_confirmed = False
-        if self.jog_enabled.get() and motor.get("online"):
-            angle = motor.get("angle_mrad", 0) / 1000.0
-            if self.last_angle is not None:
-                delta = angle - self.last_angle
-                if abs(delta) < math.pi:
-                    self.engine.jog(delta)
-            self.last_angle = angle
-        else:
-            self.last_angle = None
+        # Motor feedback drives the audio only when scratch mode is selected.
+        if self.jog_enabled.get():
+            self.engine.set_scratch_velocity(motor.get("rpm10", 0) if self.motor_online else 0)
 
     def update_loop(self):
         if self.link:
             if self.link.stop_event.is_set():
+                self.connect_button.config(text="CONNECT DEVICE")
                 self.status.set("USB DISCONNECTED")
                 self.motor_online = False
-                self.motor_armed_request = False
-                self.motor_arm_confirmed = False
-                self.last_angle = None
                 self.motor_text.set("Feedback offline · serial disconnected")
             else:
                 try:
@@ -482,25 +537,7 @@ class App(tk.Tk):
                     self.status.set("INVALID TELEMETRY")
             if self.last_telemetry and time.monotonic() - self.last_telemetry > 1.0:
                 self.motor_online = False
-                self.motor_armed_request = False
-                self.motor_arm_confirmed = False
-                self.last_angle = None
                 self.motor_text.set("Feedback offline · telemetry stale")
-            if self.motor_armed_request:
-                if not self.motor_arm_confirmed and time.monotonic() > self.motor_arm_deadline:
-                    self.motor_armed_request = False
-                    self.motor_text.set("Start not confirmed · check CAN and firmware")
-                    try:
-                        self.link.send("STOP")
-                    except Exception:
-                        self.status.set("MOTOR COMMAND FAILED")
-                else:
-                    try:
-                        self.link.send(f"SPEED {self.motor_speed.get()}")
-                    except Exception:
-                        self.motor_armed_request = False
-                        self.motor_arm_confirmed = False
-                        self.status.set("MOTOR COMMAND FAILED")
         connected = self.link is not None and not self.link.stop_event.is_set()
         self.header_status.config(fg=MINT if connected else MUTED)
         self.device_status.config(fg=MINT if connected else MUTED)
@@ -516,28 +553,69 @@ class App(tk.Tk):
             x = i * w / 8
             c.create_line(x, 0, x, h, fill="#1a2a36")
         c.create_line(0, h / 2, w, h / 2, fill="#304049")
+        pos, total, rate, playing = self.engine.snapshot()
         if self.wave is not None:
+            progress = pos / max(total, 1)
             for i, amplitude in enumerate(self.wave):
                 x = i * w / max(len(self.wave) - 1, 1)
                 height = min(1.0, float(amplitude)) * (h / 2 - 10)
-                c.create_line(x, h / 2 - height, x, h / 2 + height, fill=GOLD)
+                color = GOLD if x / w <= progress else "#766342"
+                c.create_line(x, h / 2 - height, x, h / 2 + height, fill=color)
+            cue_x = self.cue_fraction * w
+            c.create_line(cue_x, 0, cue_x, h, fill="#4ce7ba", dash=(3, 3))
         else:
             c.create_text(w / 2, h / 2 - 7, text="NO WAVEFORM", fill="#49616a", font=(MONO, 10, "bold"))
             c.create_text(w / 2, h / 2 + 13, text="LOAD A TRACK TO GET STARTED", fill="#40535e", font=(MONO, 8))
-        pos, total, rate, playing = self.engine.snapshot()
         if total:
             c.create_line(pos / total * w, 0, pos / total * w, h, fill=MINT, width=2)
         def fmt(seconds):
             return f"{int(seconds) // 60:02d}:{int(seconds) % 60:02d}"
         self.time_label.config(text=fmt(pos / rate))
         self.total_label.config(text="/ " + fmt(total / rate))
+        self.remaining_label.config(text="REMAINING  " + fmt(max(0, total - pos) / rate))
+        self.cue_label.config(text="CUE  " + fmt(self.cue_fraction * max(0, total - 1) / rate))
+        self.rpm_label.config(text=f"{self.motor_rpm:+.1f} RPM" if self.motor_online else "--.- RPM")
+        peaks, clipped, underflows, play_rate = self.engine.visual_snapshot()
+        self.rate_label.config(text=f"PLAY RATE  {play_rate:+.2f}x")
+        self._draw_platter()
+        self._draw_meter(peaks, clipped, underflows)
         self.play_badge.config(text="PLAYING" if playing else "PAUSED" if total else "STANDBY",
                                fg=MINT if playing else MUTED)
         self.play_button.config(text="PAUSE  ||" if playing else "PLAY  >")
 
+    def _draw_platter(self):
+        c = self.platter
+        c.delete("all")
+        cx = cy = 70
+        for radius, color in ((63, "#263742"), (57, "#151e29"), (48, "#33434a"),
+                              (39, "#151e29"), (24, "#223a3a")):
+            c.create_oval(cx-radius, cy-radius, cx+radius, cy+radius, fill=color, outline="#41504e")
+        angle = self.motor_angle if self.motor_online else 0.0
+        x, y = cx + 47 * math.sin(angle), cy - 47 * math.cos(angle)
+        c.create_line(cx, cy, x, y, fill=GOLD if self.motor_online else DIM, width=3)
+        c.create_oval(cx-5, cy-5, cx+5, cy+5, fill=MINT, outline="")
+        c.create_text(cx, 130, text="CAN ANGLE" if self.motor_online else "OFFLINE",
+                      fill=MUTED, font=(MONO, 7))
+
+    def _draw_meter(self, peaks, clipped, underflows):
+        c = self.meter
+        c.delete("all")
+        for channel, peak in enumerate(peaks):
+            db = 20.0 * math.log10(max(float(peak), 1e-5))
+            segments = max(0, min(16, round((db + 48.0) / 48.0 * 16)))
+            for i in range(16):
+                x = 18 + channel * 30
+                y = 96 - i * 5
+                on = i < segments
+                color = (RED if i >= 15 else GOLD if i >= 12 else MINT) if on else "#26363c"
+                c.create_rectangle(x, y, x + 18, y + 3, fill=color, outline="")
+        c.create_text(27, 108, text="L", fill=MUTED, font=(MONO, 7))
+        c.create_text(57, 108, text="R", fill=MUTED, font=(MONO, 7))
+        self.meter_status.config(text=f"{'CLIP' if clipped else 'OUTPUT'}  /  XRUN {underflows}",
+                                 fg=RED if clipped or underflows else MUTED)
+
     def shutdown(self):
         if self.link:
-            self.stop_motor()
             self.link.close()
         self.engine.close()
         self.destroy()

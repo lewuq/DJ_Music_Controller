@@ -36,14 +36,16 @@ static int64_t fake_time;
 static struct can_frame frames[128];
 static int frame_count;
 static int send_error;
+static int configured_bitrate;
 static int64_t k_uptime_get(void) { return fake_time; }
+static void k_sleep(int delay) { (void)delay; }
 static k_spinlock_key_t k_spin_lock(struct k_spinlock *x) { (void)x; return 0; }
 static void k_spin_unlock(struct k_spinlock *x, int y) { (void)x; (void)y; }
 static int k_sem_take(struct k_sem *s, int timeout) { (void)timeout; if (!s->value) return -1; --s->value; return 0; }
 static void k_sem_give(struct k_sem *s) { s->value = 1; }
 static bool device_is_ready(const struct device *d) { (void)d; return true; }
 static int can_set_mode(const struct device *d, int m) { (void)d; (void)m; return 0; }
-static int can_set_bitrate(const struct device *d, int n) { (void)d; (void)n; return 0; }
+static int can_set_bitrate(const struct device *d, int n) { (void)d; configured_bitrate = n; return 0; }
 static int can_add_rx_filter(const struct device *d, void (*cb)(const struct device *, struct can_frame *, void *), void *u, const struct can_filter *f) { (void)d; (void)cb; (void)u; (void)f; return 0; }
 static int can_start(const struct device *d) { (void)d; return 0; }
 static int can_stop(const struct device *d) { (void)d; return 0; }
@@ -69,16 +71,42 @@ static void feedback(void) {
     receive(&fake_device, &f, NULL);
 }
 static void check_text(int i, const char *s) {
-    assert(frames[i].id == MOTOR_SIMPLEFOC_ID && frames[i].dlc == 8);
+    assert(frames[i].id == MOTOR_SIMPLEFOC_ID);
+    size_t used = strlen(s) + MOTOR_SIMPLEFOC_CAN_APPEND_LF;
+    assert(frames[i].dlc == (MOTOR_SIMPLEFOC_CAN_PAD_TO_8 ? 8 : used));
     assert(!memcmp(frames[i].data, s, strlen(s)));
-    for (size_t n = strlen(s); n < 8; ++n) assert(frames[i].data[n] == 0);
+    if (MOTOR_SIMPLEFOC_CAN_APPEND_LF) assert(frames[i].data[strlen(s)] == '\n');
+    for (size_t n = used; n < frames[i].dlc; ++n) assert(frames[i].data[n] == 0);
 }
 int main(void) {
     motor_init();
     motor_command("ARM"); assert(!motor_get_status().armed && frame_count == 0);
+#if MOTOR_PROTOCOL == MOTOR_PROTOCOL_SIMPLEFOC
+    assert(configured_bitrate == 500000);
+    assert(motor_command("MC1") == 0); check_text(0, "C1");
+    assert(motor_command("ME1") == 0); check_text(1, "E1");
+    assert(motor_command("M1.5") == 0); check_text(2, "1.5");
+    assert(motor_command("MMG7") == 0); check_text(3, "MG7");
+    assert(motor_command("MLU6") == 0); check_text(4, "LU6");
+    assert(motor_command("M") == -EINVAL);
+    assert(motor_command("M123456789") == -EMSGSIZE);
+    assert(motor_command("Mfoo bar") == -EINVAL);
+    assert(motor_command("AC1") == -EINVAL);
+    assert(frame_count == 5);
+    if (MOTOR_SIMPLEFOC_CAN_APPEND_LF) {
+        assert(motor_command("M12345678") == -EMSGSIZE && frame_count == 5);
+    } else {
+        assert(motor_command("M12345678") == 0 && frame_count == 6);
+        check_text(5, "12345678");
+    }
+    frame_count = 0;
+#endif
     feedback(); motor_command("ARM"); assert(motor_get_status().armed);
 #if MOTOR_PROTOCOL == MOTOR_PROTOCOL_SIMPLEFOC
-    assert(frame_count == 3); check_text(0, "0.000"); check_text(1, "C1"); check_text(2, "E1");
+    assert(frame_count == 3); check_text(0, "0.000"); check_text(1, MOTOR_SIMPLEFOC_VELOCITY_COMMAND); check_text(2, "E1");
+    assert(motor_command("MC2") == -EBUSY && frame_count == 3);
+    assert(motor_command("ME0") == 0); check_text(3, "E0"); assert(!motor_get_status().armed);
+    frame_count = 0; motor_command("ARM"); assert(motor_get_status().armed && frame_count == 3);
     motor_command("SPEED -1234"); motor_tick(); check_text(3, "-1.234");
     motor_command("SPEED 10000"); motor_tick(); check_text(4, "10.000");
     motor_command("SPEED 10001"); motor_command("VQ 200"); motor_tick(); check_text(5, "10.000");
@@ -114,10 +142,14 @@ class MotorTests(unittest.TestCase):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text("", encoding="utf-8")
             (temp / "test.c").write_text(HARNESS, encoding="utf-8")
-            for protocol in ("MOTOR_PROTOCOL_SIMPLEFOC", "MOTOR_PROTOCOL_F103_SOURCE"):
-                with self.subTest(protocol=protocol):
-                    exe = temp / (protocol + ".exe")
+            for protocol, pad, lf, mode in (("MOTOR_PROTOCOL_SIMPLEFOC", 1, 0, 3), ("MOTOR_PROTOCOL_SIMPLEFOC", 0, 0, 3), ("MOTOR_PROTOCOL_SIMPLEFOC", 1, 1, 3), ("MOTOR_PROTOCOL_SIMPLEFOC", 0, 1, 3), ("MOTOR_PROTOCOL_SIMPLEFOC", 1, 0, 1), ("MOTOR_PROTOCOL_F103_SOURCE", 1, 0, 3)):
+                with self.subTest(protocol=protocol, pad=pad, lf=lf, mode=mode):
+                    exe = temp / (protocol + str(pad) + str(lf) + ".exe")
                     subprocess.run([compiler, "-std=c11", "-DMOTOR_PROTOCOL=" + protocol,
+                                    "-DMOTOR_AUTORUN_ENABLED=0",
+                                    "-DMOTOR_SIMPLEFOC_VELOCITY_MODE=" + str(mode),
+                                    "-DMOTOR_SIMPLEFOC_CAN_PAD_TO_8=" + str(pad),
+                                    "-DMOTOR_SIMPLEFOC_CAN_APPEND_LF=" + str(lf),
                                     "-I", str(temp), "-I", str(ROOT / "include"),
                                     "-I", str(ROOT / "src"), str(temp / "test.c"),
                                     "-o", str(exe)], check=True)

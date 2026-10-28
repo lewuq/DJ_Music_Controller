@@ -1,7 +1,9 @@
 #include "adc_inputs.h"
 #include "config.h"
 #include "motor.h"
+#include "motor_autorun.h"
 #include <stdint.h>
+#include <string.h>
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
 #include <zephyr/drivers/uart.h>
@@ -10,7 +12,7 @@
 
 static const struct device *const console = DEVICE_DT_GET(DT_CHOSEN(zephyr_console));
 
-/* CDC line protocol: MONITOR, ARM, STOP, SPEED <mrad/s>, or VQ <mV>. */
+/* CDC: existing commands plus direct SimpleFOC commands such as MC1. */
 static void poll_commands(void)
 {
     static char line[40];
@@ -21,7 +23,18 @@ static void poll_commands(void)
     while (uart_poll_in(console, &c) == 0) {
         if (c == '\n') {
             line[length] = 0;
-            if (!overflow) motor_command(line);
+            if (!overflow) {
+                if (!strcmp(line, "STOP") || !strcmp(line, "ME0")) motor_autorun_cancel();
+                int result = motor_command(line);
+#if MOTOR_PROTOCOL == MOTOR_PROTOCOL_SIMPLEFOC
+                if (line[0] == MOTOR_SIMPLEFOC_ID && strcmp(line, "MONITOR")) {
+                    /* An ACK is a CAN transmission result, not application acceptance. */
+                    printk("{\"v\":1,\"type\":\"can_result\",\"id\":%d,\"error\":%d}\n",
+                           MOTOR_SIMPLEFOC_ID, result);
+                }
+#endif
+                (void)result;
+            }
             length = 0; overflow = false;
         } else if (c != '\r') {
             if (length + 1 < sizeof(line)) line[length++] = c;
@@ -50,11 +63,14 @@ int main(void)
     int32_t values[8];
     int64_t next_sample = 0, next_motor = 0;
     motor_init();
+    motor_autorun_init();
     while (1) {
         int64_t now = k_uptime_get();
-        poll_commands();
+        /* CAN can run from power alone. Optional USB diagnostics keep the old UI. */
+        if (!MOTOR_AUTORUN_ENABLED || MOTOR_AUTORUN_USB_DIAGNOSTICS) poll_commands();
+        motor_autorun_tick();
         if (now >= next_motor) { motor_tick(); next_motor = now + 50; }
-        if (now >= next_sample) {
+        if ((!MOTOR_AUTORUN_ENABLED || MOTOR_AUTORUN_USB_DIAGNOSTICS) && now >= next_sample) {
             adc_inputs_sample(values);
             publish(values);
             next_sample = now + SAMPLE_PERIOD_MS;

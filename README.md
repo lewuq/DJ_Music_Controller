@@ -4,7 +4,7 @@
 
 A single-deck DJ controller prototype built with a **Seeed Studio XIAO STM32C5**, two ADS1115 modules, five slide potentiometers, a CAN motor controller, and a Python desktop application. The STM32C5 reads the controls and motor feedback and reports them over USB; the desktop application plays audio, displays the waveform, and applies the mixer controls.
 
-> This is an experimental prototype. CAN motor feedback has been observed, but motor START has not yet worked in the reported hardware test. The CAN control path, stopping behavior, and complete assembly still need debugging and validation. Test the motor unloaded and provide an independent way to disconnect its power.
+> This is an experimental single-deck prototype. CAN motor feedback has been observed, but automatic commands, stopping behavior, audio noise and the complete device still need hardware validation. Test unloaded and provide an independent motor power disconnect.
 
 ## Features
 
@@ -12,9 +12,10 @@ A single-deck DJ controller prototype built with a **Seeed Studio XIAO STM32C5**
 - Two ADS1115 ADC modules on I²C, sampled at a target interval of 50 ms
 - XIAO STM32C5 firmware built with Zephyr and PlatformIO
 - USB CDC serial telemetry using newline-delimited JSON, including ADC and motor feedback
-- Python desktop interface with WAV, FLAC, and OGG playback, waveform, and on-screen faders
+- Python interface with WAV, FLAC and OGG playback, waveform, platter angle, on-screen faders and output-device selection
+- CUE and seek controls, output meters, clipping and underflow indicators, and serial disconnect
 - SimpleFOC CAN feedback at 500 kbit/s, default motor ID `M`
-- Experimental CAN speed commands and manual angle-based jog; motor command execution is not yet verified
+- Motor feedback optionally controls playback direction and speed; motor command execution remains unverified
 
 ## Architecture
 
@@ -26,7 +27,7 @@ CAN motor controller <---------- CAN --------------+----> Python desktop app
                                                        Computer audio output
 ```
 
-The computer handles audio decoding and playback. USB is a custom serial protocol, not MIDI or HID. Motor jog currently changes playback position from sampled angle differences; it has no platter touch detection and is not continuous low-latency scratch playback. Audio playback and motor START/STOP are independent.
+The computer handles audio decoding and playback. USB is a custom serial protocol, not MIDI or HID. In optional scratch mode, motor feedback controls playback direction and base speed, while the fader scales it. With scratch disabled, the fader alone controls playback.
 
 ## Hardware and connections
 
@@ -47,7 +48,7 @@ The documented motor board recommends a separate 9 V supply, maximum 12 V. Check
 | Module 2 A0 | Mid EQ |
 | Module 2 A1 | High EQ |
 
-ADC values are sent in microvolts. Disabled or failed channels are `null`; the desktop interface keeps the previous value. Faders default to a 0–3.3 V mapping; measure and set actual endpoints in `app.py`.
+ADC values are sent in microvolts. Disabled or failed channels are `null`; the desktop interface keeps the previous value. Faders default to a reversed 0–3.3 V mapping; calibrate endpoints and orientation using `self.calibration` and `self.slider_inverted` in `app.py`.
 
 ## Quick start
 
@@ -73,15 +74,15 @@ py -m venv .venv
 .\.venv\Scripts\python app.py
 ```
 
-Select the XIAO COM port, click **CONNECT DEVICE**, load a track, and press **PLAY**. Uncheck **Use hardware sliders** to try the on-screen faders. A serial monitor and the app cannot normally open the same COM port at the same time.
+Select the XIAO COM port and click **CONNECT DEVICE**; choose a speaker or headset under **AUDIO OUTPUT**, then **LOAD TRACK** and press **PLAY**. Enable **Scratch with motor** to use motor feedback for audio. Click the connection button again to disconnect. Uncheck **Use hardware sliders** to try the on-screen faders. A serial monitor and the app cannot normally open the same COM port at the same time.
 
 ## Motor control and current status
 
-The default firmware targets the motor manual's SimpleFOC ASCII protocol at 500 kbit/s, ID `M`. After **ENABLE FEEDBACK**, the app shows recent CAN feedback. **START** requests speed mode and sends a target continuously; **STOP** requests zero and disable. The default target is 1 rad/s. `ARMED` is the STM32C5's local state, not an acknowledgment that the motor executed the command.
+The default firmware uses 500 kbit/s and motor ID `M`. After at least 1.5 seconds and receipt of motor feedback at `0x24D`, it attempts to enter closed-loop velocity mode and continuously commands **4 rad/s**. The motor must have monitoring enabled. Edit `dj_controller_firmware/include/config.h` and reflash to change the target or disable autorun. A CAN transmission result or the local `armed` status does not confirm command execution.
 
-In the reported hardware test, feedback was online but START did not produce rotation and the interface remained `DISARMED`. The cause has not been established. Command framing and handling need further testing on the actual motor; do not assume an online feedback indication proves the command path works.
+With optional **Scratch with motor**, measured motor speed determines playback direction and base rate, while the speed fader scales it by 0.5–1.5×. At a centered fader and 4 rad/s, playback is approximately 1×. Stopped or stale feedback smoothly silences audio; unchecking the option restores normal playback. Configure the reference speed and smoothing in `dj_audio_controller/settings.py`. There is no touch detection, and feedback jitter may produce audible flutter or noise.
 
-The motor board may enable itself at power-up. Software timeouts and STOP messages cannot guarantee a shutdown when CAN is disconnected. The separate F103 reference-source firmware uses a different binary protocol; changing bitrate alone does not make it compatible. See [firmware configuration and safety notes](dj_controller_firmware/README.md) and [desktop controls](dj_audio_controller/README.md).
+CAN command handling and motor feel changes still require hardware verification. The motor board may enable itself at power-up. See [firmware configuration](dj_controller_firmware/README.md) and [desktop controls](dj_audio_controller/README.md).
 
 ## Tests
 
@@ -100,6 +101,7 @@ dj_controller_firmware/   STM32C5 firmware, configuration, and CAN tests
   src/                    ADC, motor CAN, and USB serial logic
   zephyr/                 Zephyr build configuration
 dj_audio_controller/      Python interface, serial link, and audio engine
+  settings.py             Motor-to-audio reference speed and smoothing
   tests/                  Audio and protocol tests
 ```
 
@@ -107,4 +109,4 @@ See [firmware README](dj_controller_firmware/README.md) and [desktop README](dj_
 
 ## Next steps
 
-Debug and verify CAN commands and stop behavior, measure control-to-audio latency, calibrate the faders, and add platter touch detection before pursuing continuous scratch playback. Two decks, crossfading, and standalone audio hardware are possible future extensions.
+Debug and verify CAN commands and stop behavior, measure control-to-audio latency, calibrate the faders, and add platter touch detection and improve the scratch experience. Two decks, crossfading, and standalone audio hardware are possible future extensions.

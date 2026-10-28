@@ -16,9 +16,10 @@ def parse_line(line):
     except (ValueError, TypeError, KeyError, AttributeError):
         return None
 
-def normalize(uv, low=0, high=3300000):
+def normalize(uv, low=0, high=3300000, inverted=False):
     if uv is None or isinstance(uv, bool) or not isinstance(uv, (float, int)) or not math.isfinite(uv):
         return None
     if high <= low:
         raise ValueError("Calibration maximum must exceed minimum")
-    return min(1.0, max(0.0, (uv - low) / (high - low)))
+    value = min(1.0, max(0.0, (uv - low) / (high - low)))
+    return 1.0 - value if inverted else value

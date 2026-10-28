@@ -4,5 +4,6 @@
 struct motor_status { bool online; bool armed; int32_t angle_mrad; int32_t rpm_tenths; int error; };
 void motor_init(void);
 void motor_tick(void);
-void motor_command(const char *line);
+/* Returns 0 on acceptance or a negative errno value on rejection/failure. */
+int motor_command(const char *line);
 struct motor_status motor_get_status(void);
