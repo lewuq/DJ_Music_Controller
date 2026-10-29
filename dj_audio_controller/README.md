@@ -1,31 +1,23 @@
-# Python DJ audio controller
+# Python dual-deck controller
 
-This single-deck prototype works with `dj_controller_firmware`. Five sliders control volume, playback speed and three-band EQ. Check **Scratch with motor** to control signed playback rate with motor speed; the speed fader still scales it by 0.5–1.5×. With scratch off, the speed fader alone controls playback. In scratch mode, stopped or stale motor feedback smoothly stops audio. The XIAO firmware may still independently run the motor.
+See the [project guide](../README.md) for wiring, operation and limitations.
 
-## Run on Windows
+`app.py` provides two decks, F1–F5, Jog modes, output selection and an opt-in motor switch. `audio_engine.py` handles decks, Jog, filtering and mixing. `controls.py` handles pickup and the motor heartbeat. `protocol.py` and `serial_link.py` handle USB telemetry. WAV, FLAC and OGG are supported; MP3 depends on libsndfile. Source BPM is entered manually; no automatic BPM detection or pitch-preserving time stretch is included.
 
-Install Python with Tkinter and, in this directory, run:
+There is no touch sensor: VINYL uses angle changes and an approximately 220 ms idle timeout to approximate release. Enabling the motor drive automatically selects MOTORIZED mode; commands are sent automatically by the app. The motor board may enable itself at power-up; local ARMED is not proof of actual motion or disablement.
 
-```powershell
-py -m venv .venv
-.\.venv\Scripts\python -m pip install -r requirements.txt
-.\.venv\Scripts\python app.py
-```
+F5 and JOG FILTER operate a simple low/high-pass filter for the selected deck; Echo and Reverb are not implemented. F4 and F5 use soft pickup after deck selection. See `settings.py` for timing, calibration and direction. Force-feedback and adjustable motor damping are not implemented. Verify CAN command execution and audio on actual hardware.
 
-Select the XIAO COM port, click CONNECT DEVICE, load a WAV, FLAC or OGG track and press PLAY. DISCONNECT releases the port. Select a device in AUDIO OUTPUT. Use hardware sliders can be unchecked to control the on-screen sliders. MP3 support depends on the installed libsndfile.
+Install `requirements.txt`, then run `python -m unittest discover -s tests -v`.
 
-| ADC input | Function |
-|---|---|
-| Module 1 A1 | Volume |
-| Module 1 A2 | Playback speed, 0.5–1.5× with pitch change |
-| Module 1 A3 | Low EQ |
-| Module 2 A0 | Mid EQ |
-| Module 2 A1 | High EQ |
+## Motor drive status
 
-`self.calibration` and `self.slider_inverted` in `app.py` control measured voltage endpoints and slider orientation. `settings.py` defines the 1× motor reference speed (4 rad/s) and scratch rate smoothing.
+Connect the XIAO USB serial port and confirm feedback online with CAN error 0. Enabling motor drive selects MOTORIZED, requests local ARM and sends speed heartbeats from a background worker independent of UI drawing. Feedback loss, an XIAO error, a serial send failure or failure to reach local ARMED disables the drive, attempts STOP and keeps a specific reason visible; there is no automatic retry. Manual mode changes and disabling also request STOP.
 
-The dashboard shows CAN feedback, waveform, cue, output peaks, CLIP and cumulative XRUNs. A CLIP indication means mixed audio exceeds full scale; XRUN means PortAudio reported an output underflow. If noise remains when the motor is powered, compare playback with the motor off and on and inspect the audio connection, power and grounding. The actual noise cause requires listening tests. The motor board must send `0x24D` for the feedback display to be online. Motor firmware behavior and physical hardware still require verification.
+Online feedback, local ARMED and CAN ACK do not prove that the motor executed the command. Hardware command framing and movement still need validation, and STOP may not reach a disconnected motor.
 
-Run `python -m unittest discover -s tests -v` after installing dependencies.
+If `Serial send ARM failed: Write timeout` is displayed, flash the firmware version with the interrupt-driven CDC RX fix. After disconnecting the GUI from the port, run `python tools\check_cdc.py COM162` to verify PING/PONG. The test sends no motor command. USB PING success does not verify motor CAN execution.
 
-Scratch playback remains an experimental single-deck speed-based implementation with no touch detection. Speed feedback jitter can cause audible flutter; uncheck scratch to compare normal playback.
+MOTORIZED combines rotation and approximate sensorless scratching after stable speed is reached. Speed deviations are not proof of touch; holding and a stalled motor cannot be reliably distinguished. Tune `MOTORIZED_*` in `settings.py` on real hardware. Normal playback uses the F4 tempo.
+
+**Known issue:** The current motorized scratch mapping has been reported unresponsive on hardware. The simulated tests do not establish real-world scratch performance.

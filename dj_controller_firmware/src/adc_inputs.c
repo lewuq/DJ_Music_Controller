@@ -6,6 +6,8 @@
 #include <zephyr/drivers/i2c.h>
 #include <zephyr/kernel.h>
 
+#define ADS1115_SINGLE_SHOT_860_SPS 0xC3E3U
+
 static const struct device *const bus = DEVICE_DT_GET(DT_NODELABEL(i2c1));
 static const uint8_t addr[2] = {ADC1_ADDRESS, ADC2_ADDRESS};
 static const bool enabled[2][4] = {{M1_A0,M1_A1,M1_A2,M1_A3}, {M2_A0,M2_A1,M2_A2,M2_A3}};
@@ -29,8 +31,8 @@ void adc_inputs_sample(int32_t values[8])
     for (int ch = 0; ch < 4; ++ch) {
         bool started[2] = {false, false};
         for (int m = 0; m < 2; ++m) {
-            /* AINx vs GND, 4.096 V FSR, single-shot, 128 SPS. */
-            if (enabled[m][ch]) started[m] = !write_config(addr[m], 0xC383 | (ch << 12));
+            /* AINx vs GND, 4.096 V FSR, single-shot, 860 SPS. */
+            if (enabled[m][ch]) started[m] = !write_config(addr[m], ADS1115_SINGLE_SHOT_860_SPS | (ch << 12));
         }
         for (int m = 0; m < 2; ++m) {
             if (!started[m]) continue;

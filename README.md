@@ -1,69 +1,62 @@
 # XIAO DJ Music Controller
 
-[English](README.md) | [中文](README_CN.md)
+English | [中文](README_CN.md)
 
-A single-deck DJ controller prototype built with a **Seeed Studio XIAO STM32C5**, two ADS1115 modules, five slide potentiometers, a CAN motor controller, and a Python desktop application. The STM32C5 reads the controls and motor feedback and reports them over USB; the desktop application plays audio, displays the waveform, and applies the mixer controls.
+A dual-deck DJ controller prototype using a Seeed Studio XIAO STM32C5, two ADS1115 ADC modules, five slide potentiometers, a CAN motor controller and a Python desktop application. The XIAO reads the faders and motor feedback; the computer plays and mixes audio and requests motor control over USB CDC and CAN.
 
-> This is an experimental single-deck prototype. CAN motor feedback has been observed, but automatic commands, stopping behavior, audio noise and the complete device still need hardware validation. Test unloaded and provide an independent motor power disconnect.
+**Status:** This is an experimental project. USB PING/PONG and CAN motor feedback have been observed on hardware. Motor command execution, stopping behavior, scratch audio, latency and audio quality still need further validation. The current motorized scratch mapping has been reported to be unresponsive in real use. The available tests and a successful CAN transmission do not prove the motor or audio behaves as intended.
 
-## Features
+## Controls and features
 
-- Five physical faders for volume, playback rate, and three-band EQ
-- Two ADS1115 ADC modules on I²C, sampled at a target interval of 50 ms
-- XIAO STM32C5 firmware built with Zephyr and PlatformIO
-- USB CDC serial telemetry using newline-delimited JSON, including ADC and motor feedback
-- Python interface with WAV, FLAC and OGG playback, waveform, platter angle, on-screen faders and output-device selection
-- CUE and seek controls, output meters, clipping and underflow indicators, and serial disconnect
-- SimpleFOC CAN feedback at 500 kbit/s, default motor ID `M`
-- Motor feedback optionally controls playback direction and speed; motor command execution remains unverified
+| Fader | ADS1115 input | Function |
+| --- | --- | --- |
+| F1 | Module 1 A1 (`0x49`) | Deck A volume |
+| F2 | Module 1 A2 (`0x49`) | Deck B volume |
+| F3 | Module 1 A3 (`0x49`) | Crossfader: A left, B right, both open in the center |
+| F4 | Module 2 A0 (`0x48`) | Selected deck tempo/pitch, 0.5–1.5× |
+| F5 | Module 2 A1 (`0x48`) | Selected deck low-pass/high-pass filter |
 
-## Architecture
+F3 uses a short gain transition to reduce clicks. F4 and F5 use soft pickup when switching decks. Adjust fader direction and calibrated endpoints in [`settings.py`](dj_audio_controller/settings.py). F4 changes pitch along with speed; source BPM is entered manually.
 
-```text
-5 slide potentiometers -> 2 x ADS1115 -> I²C -> XIAO STM32C5
-                                                    |  USB CDC / JSON
-CAN motor controller <---------- CAN --------------+----> Python desktop app
-                                                              |
-                                                       Computer audio output
-```
-
-The computer handles audio decoding and playback. USB is a custom serial protocol, not MIDI or HID. In optional scratch mode, motor feedback controls playback direction and base speed, while the fader scales it. With scratch disabled, the fader alone controls playback.
+The English-language desktop interface provides two decks, WAV/FLAC/OGG playback, cue and seek, output-device selection, per-deck and stereo master meters, clipping indication and a live stereo waveform. MP3 support depends on libsndfile. On Windows, the window starts maximized and can be resized or scrolled.
 
 ## Hardware and connections
 
 | Component | Connection / configuration |
 | --- | --- |
-| XIAO STM32C5 | USB CDC to computer; D4/PB7 SDA and D5/PB6 SCL |
-| ADS1115 modules | I²C addresses `0x49` and `0x48`; XIAO, ADCs and faders share ground |
-| Five faders | Module 1 A1–A3 and module 2 A0–A1 |
-| Motor controller | XIAO rear CAN_H/CAN_L pads to motor CAN_H/CAN_L; compatible signal ground |
+| XIAO STM32C5 | USB CDC to computer; I²C SDA D4/PB7, SCL D5/PB6 |
+| ADS1115 | Module 1 address `0x49`; module 2 address `0x48`; shared ground with the XIAO and faders |
+| Motor controller | Compatible SimpleFOC firmware, classic CAN at 500 kbit/s, node ID `M` (`0x4D`), feedback ID `0x24D` |
 
-The documented motor board recommends a separate 9 V supply, maximum 12 V. Check polarity and the actual motor documentation. Use one 120 Ω terminator at each end of the CAN bus; the motor board may already have one. See the [firmware guide](dj_controller_firmware/README.md) for wiring and protocol details.
+The firmware enables module 1 A1–A3 and module 2 A0–A1 by default. ADS1115 conversions are configured at 860 SPS and telemetry targets a 10 ms period; the actual update rate and end-to-end latency need to be measured. See the [firmware guide](dj_controller_firmware/README.md) for CAN and USB details.
 
-| ADC input | Desktop control |
-| --- | --- |
-| Module 1 A1 | Volume |
-| Module 1 A2 | Playback rate, 0.5–1.5× with pitch change |
-| Module 1 A3 | Low EQ |
-| Module 2 A0 | Mid EQ |
-| Module 2 A1 | High EQ |
+## Jog and motor modes
 
-ADC values are sent in microvolts. Disabled or failed channels are `null`; the desktop interface keeps the previous value. Faders default to a reversed 0–3.3 V mapping; calibrate endpoints and orientation using `self.calibration` and `self.slider_inverted` in `app.py`.
+- **VINYL / SCRATCH:** manual rotation moves the selected audio position. About 220 ms without movement returns to normal playback; this is an idle heuristic.
+- **PITCH BEND:** manually turn the motor to temporarily adjust the selected deck's speed.
+- **JOG FILTER:** manually turn the motor to change the selected deck's filter; F5 can take over.
+- **MOTORIZED:** with feedback online, enabling motorized drive requests closed-loop velocity of 4 rad/s. The software attempts to infer manual scratching from speed changes after the platter reaches stable speed. This mapping is experimental and has been reported unresponsive; it requires hardware debugging.
 
-## Quick start
+There is no touch sensor. The software cannot reliably distinguish a held platter from a motor stall. Normal playback speed follows F4. Recovery audio is limited by default to the F4 tempo; parameters are in [`settings.py`](dj_audio_controller/settings.py). The motor board can power up enabled even though XIAO autorun is disabled. Local `ARMED` and CAN acknowledgement do not prove a command was executed, and STOP may not reach the motor if CAN fails. Test unloaded with an independent motor power disconnect.
 
-### Build STM32C5 firmware
+Adjustable motor damping, force feedback, automatic BPM analysis, pitch-preserving time stretch, Echo and Reverb are not implemented.
 
-Install [PlatformIO](https://platformio.org/) with Seeed Studio platform and `seeed-xiao-stm32c5` board support:
+## Build and run
+
+### Firmware
+
+Install PlatformIO and the Seeed Studio platform with `seeed-xiao-stm32c5` support:
 
 ```powershell
 cd dj_controller_firmware
 pio run
 ```
 
-Flash the resulting firmware to the XIAO using its PlatformIO or UF2 procedure. This does not update the motor controller firmware.
+On the current Windows Zephyr/PlatformIO setup, a project path containing spaces can break device-tree preprocessing; use a path without spaces if this occurs.
 
-### Run the desktop application
+Flash the resulting XIAO firmware. This does not replace the motor controller's firmware. Fader channels, SimpleFOC protocol settings and autorun are in [`include/config.h`](dj_controller_firmware/include/config.h).
+
+### Desktop application
 
 Install Python 3.10–3.12 with Tkinter. On Windows:
 
@@ -74,39 +67,33 @@ py -m venv .venv
 .\.venv\Scripts\python app.py
 ```
 
-Select the XIAO COM port and click **CONNECT DEVICE**; choose a speaker or headset under **AUDIO OUTPUT**, then **LOAD TRACK** and press **PLAY**. Enable **Scratch with motor** to use motor feedback for audio. Click the connection button again to disconnect. Uncheck **Use hardware sliders** to try the on-screen faders. A serial monitor and the app cannot normally open the same COM port at the same time.
+Select the XIAO COM port and **CONNECT**, select the audio output, load tracks in Deck A/B and press **PLAY**. Choose the controlled deck. A serial monitor and the app normally cannot open the same COM port simultaneously. To diagnose USB writes, disconnect the app and run `python tools\check_cdc.py COM162`, substituting your XIAO port. The PING test sends no motor command and checks USB only.
 
-## Motor control and current status
-
-The default firmware uses 500 kbit/s and motor ID `M`. After at least 1.5 seconds and receipt of motor feedback at `0x24D`, it attempts to enter closed-loop velocity mode and continuously commands **4 rad/s**. The motor must have monitoring enabled. Edit `dj_controller_firmware/include/config.h` and reflash to change the target or disable autorun. A CAN transmission result or the local `armed` status does not confirm command execution.
-
-With optional **Scratch with motor**, measured motor speed determines playback direction and base rate, while the speed fader scales it by 0.5–1.5×. At a centered fader and 4 rad/s, playback is approximately 1×. Stopped or stale feedback smoothly silences audio; unchecking the option restores normal playback. Configure the reference speed and smoothing in `dj_audio_controller/settings.py`. There is no touch detection, and feedback jitter may produce audible flutter or noise.
-
-CAN command handling and motor feel changes still require hardware verification. The motor board may enable itself at power-up. See [firmware configuration](dj_controller_firmware/README.md) and [desktop controls](dj_audio_controller/README.md).
-
-## Tests
+## Tests and structure
 
 ```powershell
 cd dj_audio_controller
 .\.venv\Scripts\python -m unittest discover -s tests -v
 ```
 
-The firmware directory also contains a host-side simulated CAN test in `tests/`. These checks do not replace a Zephyr build or motor hardware testing.
-
-## Project structure
+The firmware directory also contains host-side protocol and USB receive tests. Simulation is not a substitute for a firmware build or hardware testing.
 
 ```text
-dj_controller_firmware/   STM32C5 firmware, configuration, and CAN tests
-  include/                ADC channels and motor configuration
-  src/                    ADC, motor CAN, and USB serial logic
-  zephyr/                 Zephyr build configuration
-dj_audio_controller/      Python interface, serial link, and audio engine
-  settings.py             Motor-to-audio reference speed and smoothing
-  tests/                  Audio and protocol tests
+dj_controller_firmware/   XIAO ADC, CAN and USB CDC firmware
+  include/                Channel and motor configuration
+  src/                    Layered ADC, motor and USB implementation
+  zephyr/                 Zephyr configuration and device-tree overlay
+  tests/                  Host-side firmware tests
+dj_audio_controller/      Python interface and audio processing
+  app.py                  UI and device integration
+  audio_engine.py         Dual-deck playback, mixing and Jog processing
+  controls.py             Fader pickup and motor heartbeat
+  protocol.py             Telemetry parsing
+  serial_link.py          USB serial connection
+  widgets.py              Waveforms, meters and controls
+  settings.py             Calibration and behavior parameters
+  tools/                  Non-actuating USB diagnostic
+  tests/                  Audio, protocol and control tests
 ```
 
-See [firmware README](dj_controller_firmware/README.md) and [desktop README](dj_audio_controller/README.md) for details.
-
-## Next steps
-
-Debug and verify CAN commands and stop behavior, measure control-to-audio latency, calibrate the faders, and add platter touch detection and improve the scratch experience. Two decks, crossfading, and standalone audio hardware are possible future extensions.
+See the [firmware README](dj_controller_firmware/README.md) and [desktop README](dj_audio_controller/README.md) for further details.

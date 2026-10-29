@@ -11,7 +11,7 @@
 #define M2_A3 0
 #define ADC1_ADDRESS 0x49
 #define ADC2_ADDRESS 0x48
-#define SAMPLE_PERIOD_MS 50
+#define SAMPLE_PERIOD_MS 10 /* Aim for 100 Hz telemetry; actual rate depends on ADC/I2C. */
 
 /* Select ONLY after identifying the firmware actually installed on the motor. */
 #define MOTOR_PROTOCOL_DISABLED 0
@@ -48,7 +48,7 @@
 
 /* Standalone CAN rotation: start once after feedback and continue until fault. */
 #ifndef MOTOR_AUTORUN_ENABLED
-#define MOTOR_AUTORUN_ENABLED 1
+#define MOTOR_AUTORUN_ENABLED 0
 #endif
 #define MOTOR_AUTORUN_SPEED_MRAD_S 4000 /* 4.0 rad/s; sign sets direction */
 #define MOTOR_AUTORUN_START_DELAY_MS 1500 /* Delay after XIAO startup in milliseconds. */

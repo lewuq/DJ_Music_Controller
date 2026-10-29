@@ -1,48 +1,23 @@
-# Python 打碟上位机原型
+# Python 双音轨上位机
 
-配合 `dj_controller_firmware` 使用：单曲加载与播放、波形和播放位置显示、五个滑杆控制音量/速度/三段均衡，并可通过电机反馈控制音频播放速度和方向。它是对视频交互的第一版近似实现，还不是完整 DJ 软件或刮碟引擎；目前尚未完成真实硬件和音频设备联调。
+完整接线、功能、限制与运行步骤参见[项目中文说明](../README_CN.md)。
 
-## Windows 启动
+`app.py` 提供双 Deck、F1～F5、Jog 模式、输出设备、CAN 状态和电动转盘开关；`audio_engine.py` 处理音轨、位置、滤波和混音；`controls.py` 管理软接管及电机心跳；`protocol.py` 与 `serial_link.py` 解析 XIAO USB 数据。音轨格式支持 WAV、FLAC、OGG，MP3 取决于 libsndfile。Deck BPM 为手动输入，无自动分析和保音高变速。
 
-安装 Python 3.10～3.12 并确保包含 Tkinter，然后在此目录运行：
+当前未接触摸传感器：VINYL 通过角度变化和约 220 ms 停止超时近似手搓/松手；VINYL、PITCH BEND、JOG FILTER 手动转动时不主动请求速度闭环。勾选 `Enable motorized drive` 会自动切换到 MOTORIZED，程序负责发送命令。电机板自身可能上电使能，不能仅凭本地 ARMED 确认实物状态。
 
-```powershell
-py -m venv .venv
-.\.venv\Scripts\python -m pip install -r requirements.txt
-.\.venv\Scripts\python app.py
-```
+F5 和 JOG FILTER 均操作当前 Deck 的一阶低通/高通滤波，未实现 Echo 或 Reverb。F4 和 F5 在切换 Deck 时使用软接管。参数和端点见 `settings.py`。电机力反馈与可调阻尼未实现，CAN 命令执行和实物音频仍需测试。
 
-选择 XIAO 对应 COM 口并点击 CONNECT DEVICE；连接后同一按钮变为 DISCONNECT，可主动断开。AUDIO OUTPUT 中选择耳机输出，优先尝试 Windows WASAPI；插拔耳机后点击旁边刷新按钮；通过 LOAD TRACK 选择 WAV、FLAC 或 OGG，按 PLAY / PAUSE 播放，点击波形可跳转。勾选 Use hardware sliders 使用实体滑杆；取消勾选后可用界面滑杆独立试用。同一 COM 口一般不能同时由串口监视器和本程序占用。MP3 是否可用取决于本机 libsndfile，当前不保证支持。
+安装 `requirements.txt` 后运行 `python -m unittest discover -s tests -v`。
 
-窗口较小或系统显示缩放较大时，可使用右侧和底部滚动条查看全部控件；鼠标滚轮纵向滚动，Shift + 滚轮横向滚动。五个界面推子支持鼠标拖动，也可以在选中后使用上下方向键微调。
+## 电机开关与状态
 
-| ADC 输入 | 功能 |
-|---|---|
-| 模块 1 A1 | 音量 |
-| 模块 1 A2 | 速度 0.5～1.5 倍（音高也会变化） |
-| 模块 1 A3 | 低频均衡 |
-| 模块 2 A0 | 中频均衡 |
-| 模块 2 A1 | 高频均衡 |
+先连接 XIAO 的 USB 串口（不要选择电机板的 USB 转串口），确认`FEEDBACK ONLINE` 和 `CAN ERROR 0`。勾选 `Enable motorized drive` 后，界面显示正在启动；XIAO 本地 ARMED 后，上位机后台线程按周期发送目标速度。CAN 反馈离线、设备报错、串口发送失败或 XIAO 未进入本地 ARMED 时，程序会取消启用、尝试发送 STOP，并保留可见的具体原因；不会自动重试。切换到手动 Jog 模式或取消勾选也会请求停止。
 
-均衡器使用 250 Hz / 4 kHz 一阶分频，每段调整范围 -12～+6 dB，约 2/3 位置对应 0 dB；它是基础音效，不等同于商用调音台。默认按 0～3.3 V 映射滑杆，实际使用时可在 `app.py` 的 `self.calibration` 中填入每路实测最小/最大电压，单位微伏。非线性或对数电位器需要实测曲线，单独校准两端不能将其变成线性。ADC 未启用或读取失败时，界面保留上次值。
+反馈在线只表示收到了电机 CAN 帧，XIAO 本地 ARMED 或 CAN 帧应答都不证明电机实际执行；帧格式和实物效果仍需联调。实际断线时 STOP 可能不能送达，电机板上电仍可能自行使能。
 
-勾选 **Scratch with motor** 可使电机反馈控制音频速度与正反方向，速度滑杆（模块 1 A2）继续提供 0.5～1.5 倍倍率；松开勾选则恢复普通滑杆控速。勾选时电机停止或反馈超时会使音频平滑停止，暂停/播放仍由 PLAY 控制。电机板须开启 CAN 监控并发送 `0x24D` 才能显示反馈。上位机不发送电机命令；XIAO 固件仍可能根据自身配置自动运行电机，实际情况需要实测。界面本地 `armed` 不能证明电机板实际输出状态。
+上位机自带文字均为英文。若看到 `Serial send ARM failed: Write timeout`，需要烧录本版本的 CDC 接收修复固件。可断开上位机串口后运行 `python tools\check_cdc.py COM162`；该工具只发送 PING，不控制电机，且必须使用已烧录新固件的 XIAO。电脑和上位机通常不能同时打开同一 COM 口。
 
-## 为什么先用 Python，如何继续
+MOTORIZED 同时支持主动转动和无触摸刮碟：电机先达到稳定速度后，程序依据速度偏差推测手动干预；恢复稳定后回到 F4 播放速度。它不能区分按住和故障停转，参数见 `settings.py` 的 `MOTORIZED_*`，需实际调试。
 
-Python 是语言，Qt 是界面框架，二者可以组合：后续可使用 Python + PySide6。第一版用 Tkinter 减少安装和界面复杂度；Qt 更适合扩展漂亮的波形、设备设置和复杂布局。音频回调、串口和界面已分离，但 Python 加通用操作系统不能保证专业打碟所需的低延迟。
-
-后续可增加可视化校准、双音轨和交叉推子、Cue、保持音高的变速、唱盘触摸检测、力反馈手感及端到端延迟测量。转成独立设备时需要音频编解码器、DMA 缓冲、DSP、存储和足够的处理能力。
-
-`protocol.py` 解析串口数据，`serial_link.py` 管理串口，`audio_engine.py` 负责音频，`app.py` 负责界面。安装依赖后可执行 `python -m unittest discover -s tests -v` 验证核心逻辑。
-
-
-五路实体滑杆默认均反向映射；若个别接线方向不同，可修改 `app.py` 的 `self.slider_inverted`，按界面通道顺序将该路设为 `False`。音频输出设备切换只影响本程序，不会更改 Windows 默认设备。自动旋转为速度闭环，手动干预会受到电机力矩影响；没有触摸传感器，因此不能自动判断按住唱盘。
-
-`settings.py` 的 `SCRATCH_REFERENCE_SPEED_RAD_S` 定义滑杆居中时对应 1 倍播放速度的电机速度，当前为 4 rad/s；`SCRATCH_RATE_SMOOTHING_SECONDS` 控制速度平滑。固件启动等待仍由 `MOTOR_AUTORUN_START_DELAY_MS` 设置。
-
-## 音频噪音排查与界面
-
-界面提供基于 CAN 角度的唱盘指示、音频播放速率、真实左右输出电平、当前会话最近音轨、±5 秒跳转和 CUE 设置/跳转。`CLIP` 表示音频混合信号超过数字满幅，出现时可调低音量或 EQ；`XRUN` 是 PortAudio 报告的输出缓冲欠载累计次数，持续增加时请尝试关闭占用 CPU 的程序或切换输出设备。最近音轨只保存在本次运行期间。
-
-电机控速可能引起此前出现的抖音或噪音；可取消勾选 Scratch with motor 与普通播放对比。若电机接入或上电后耳机仍有噪音，可对比电机断电和上电时的普通播放，并检查供电、接地及音频连接；也可查看 `CLIP` 和 `XRUN`。噪音的实际原因及改善效果需要听测确认。
+**已知问题：**当前电动刮碟映射在实机使用中被反馈无响应；模拟测试不能证明实际刮碟效果。

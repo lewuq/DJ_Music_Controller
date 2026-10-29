@@ -1,71 +1,64 @@
-# XIAO DJ Music Controller 打碟控制器
+# XIAO DJ 音乐控制器
 
-[English](README.md) | [中文](README_CN.md)
+[English](README.md) | 中文
 
-这是一个单音轨打碟控制器原型，由 **Seeed Studio XIAO STM32C5**、两块 ADS1115、五个滑动电位器、CAN 电机控制板和 Python 上位机组成。STM32C5 采集实体控制器与电机反馈并通过 USB 传给电脑；上位机负责音频播放、波形显示和混音控制。
+这是一个双音轨 DJ 控制器原型，使用 Seeed Studio XIAO STM32C5、两块 ADS1115、五个滑动电位器、CAN 电机驱动板和 Python 上位机。XIAO 读取滑轨和电机反馈，电脑负责音频播放和混音，并通过 USB CDC 与 CAN 请求电机控制。
 
-> 当前是单音轨实验原型。已观察到 CAN 电机反馈，但自动控制命令、停止行为、音频噪音和完整设备的体验仍需实机验证。首次联调应空载，并准备独立切断电机电源的方式。
+**当前状态：**项目仍处于软硬件联调阶段。实机已观察到 USB PING/PONG 和 CAN 电机反馈；电机命令执行、停止行为、刮碟声音、延迟和音频质量仍需进一步验证。目前电动刮碟映射在实机使用中被反馈为无响应，需要继续排查。模拟测试通过或 CAN 帧发送成功不代表电机和音频效果已验证。
 
-## 功能
+## 滑轨和界面
 
-- 五路实体推子控制音量、播放速度和三段均衡
-- 两块 ADS1115 通过 I²C 采集，目标采样周期 50 ms
-- 基于 Zephyr 和 PlatformIO 的 XIAO STM32C5 固件
-- USB CDC 串口发送逐行 JSON，包含 ADC 和电机反馈
-- Python 上位机支持 WAV、FLAC、OGG 播放、波形、唱盘角度、屏幕推子和音频输出设备选择
-- 支持 CUE、前后跳转、输出电平、削波提示、音频欠载计数及串口主动断开
-- 按 SimpleFOC 协议以 500 kbit/s 接收 CAN 电机反馈，默认电机 ID 为 `M`
-- 电机反馈可选控制音频正反方向和播放速度；电机命令执行尚待验证
+| 滑轨 | ADS1115 输入 | 功能 |
+| --- | --- | --- |
+| F1 | 模块 1 A1（`0x49`） | Deck A 音量 |
+| F2 | 模块 1 A2（`0x49`） | Deck B 音量 |
+| F3 | 模块 1 A3（`0x49`） | 交叉推子：左 A、右 B，中间两路均打开 |
+| F4 | 模块 2 A0（`0x48`） | 当前 Deck 的速度 / Pitch，0.5～1.5 倍 |
+| F5 | 模块 2 A1（`0x48`） | 当前 Deck 的低通 / 高通滤波 |
 
-## 系统架构
+F3 使用短暂音量过渡以减少点击声；切换 Deck 后，F4 和 F5 使用软接管。滑轨方向及实测端点在 [`settings.py`](dj_audio_controller/settings.py) 中调整。F4 改变播放速度时音高也会变化；原始 BPM 需要手动输入。
 
-```text
-5 路滑动电位器 -> 2 块 ADS1115 -> I²C -> XIAO STM32C5
-                                                  |  USB CDC / JSON
-CAN 电机控制板 <--------------- CAN --------------+----> Python 上位机
-                                                               |
-                                                          电脑音频输出
-```
+英文上位机提供双 Deck、WAV/FLAC/OGG 播放、CUE、进度跳转、音频输出设备选择、单轨和立体声主输出电平、削波提示及实时立体声波形。MP3 支持取决于 libsndfile。Windows 窗口默认最大化，可恢复、缩放及滚动。
 
-音频解码与播放在电脑上完成。USB 使用自定义串口协议，不是 MIDI 或 HID。勾选 Scratch with motor 后，电机反馈控制音频方向和基础速度，速度滑杆控制倍率；取消勾选后由速度滑杆独立控制播放。
+## 硬件连接
 
-## 硬件与接线
-
-| 部件 | 连接 / 配置 |
+| 硬件 | 连接 / 配置 |
 | --- | --- |
-| XIAO STM32C5 | USB CDC 连接电脑；D4/PB7 为 SDA，D5/PB6 为 SCL |
-| 两块 ADS1115 | I²C 地址为 `0x49`、`0x48`；XIAO、ADC 和推子共地 |
-| 五个推子 | 模块 1 的 A1～A3、模块 2 的 A0～A1 |
-| 电机控制板 | XIAO 背面 CAN_H/CAN_L 焊盘连接电机对应端口，并提供相容的信号参考地 |
+| XIAO STM32C5 | USB CDC 连接电脑；I²C 使用 SDA D4/PB7、SCL D5/PB6 |
+| ADS1115 | 模块 1 地址 `0x49`，模块 2 地址 `0x48`；与 XIAO、滑轨共地 |
+| 电机驱动板 | 兼容 SimpleFOC 固件，经典 CAN 500 kbit/s，节点 ID `M`（`0x4D`），反馈 ID `0x24D` |
 
-所附电机板说明书推荐独立 9 V 供电、最高 12 V；请核对实际电机资料和电源极性。CAN 总线两端各需一个 120 Ω 终端，电机板可能已带终端电阻。接线和协议细节见[固件中文文档](dj_controller_firmware/README.zh-CN.md)。
+固件默认启用模块 1 的 A1～A3 和模块 2 的 A0～A1。ADS1115 配置为 860 SPS，USB 遥测目标周期为 10 ms；实际更新率和控制到声音的延迟需要测量。CAN 与 USB 配置见[固件说明](dj_controller_firmware/README.zh-CN.md)。
 
-| ADC 输入 | 上位机功能 |
-| --- | --- |
-| 模块 1 A1 | 音量 |
-| 模块 1 A2 | 播放速度 0.5～1.5 倍，音高也会变化 |
-| 模块 1 A3 | 低频均衡 |
-| 模块 2 A0 | 中频均衡 |
-| 模块 2 A1 | 高频均衡 |
+## Jog 和电机模式
 
-ADC 以微伏为单位发送，未启用或读取失败的通道为 `null`，上位机保留该路上次值。推子默认按 0～3.3 V 映射且方向反转，实际使用时应在上位机 `app.py` 的 `self.calibration` 和 `self.slider_inverted` 中校准。
+- **VINYL / SCRATCH**：手动旋转电机控制当前音频位置；约 220 ms 没有运动后恢复播放，这是无触摸的近似判断。
+- **PITCH BEND**：手动转动时临时调整当前 Deck 的播放速度。
+- **JOG FILTER**：手动转动调节当前 Deck 的滤波，F5 可以重新接管。
+- **MOTORIZED**：反馈在线并启用电动转盘后，程序请求 4 rad/s 速度闭环。达到稳定转速后，软件尝试通过速度变化判断手动刮碟；该映射目前仍在调试，实机曾反馈无响应。
 
-## 快速开始
+当前没有触摸传感器，软件不能可靠地区分按住转盘和电机故障停转。正常播放速度由 F4 控制；恢复阶段的音频速度默认受 F4 限制，参数位于 [`settings.py`](dj_audio_controller/settings.py)。XIAO 默认不自动启动电机，但电机板本身上电后仍可能使能。界面的本地 `ARMED` 和 CAN 应答不能证明电机已执行命令，CAN 故障时 STOP 也可能无法送达。实机测试时请空载并准备独立断开电机电源。
 
-### 编译 STM32C5 固件
+目前没有实现可调电磁阻尼、力反馈、自动 BPM 分析、保音高变速、Echo 或 Reverb。
 
-安装 [PlatformIO](https://platformio.org/)、Seeed Studio 平台和 `seeed-xiao-stm32c5` 开发板支持：
+## 编译和运行
+
+### 固件
+
+安装 PlatformIO 和支持 `seeed-xiao-stm32c5` 的 Seeed Studio 平台：
 
 ```powershell
 cd dj_controller_firmware
 pio run
 ```
 
-使用开发板的 PlatformIO 或 UF2 方式将生成的固件烧录到 XIAO。此操作不会更新电机控制板自身的固件。
+当前 Windows Zephyr / PlatformIO 环境中，工程路径包含空格可能导致设备树预处理失败；遇到此问题时请使用无空格的路径。
 
-### 运行电脑上位机
+烧录生成的 XIAO 固件；这不会替换电机驱动板固件。通道、SimpleFOC 协议和自动运行配置见 [`include/config.h`](dj_controller_firmware/include/config.h)。
 
-安装包含 Tkinter 的 Python 3.10～3.12。在 Windows 下运行：
+### 上位机
+
+安装包含 Tkinter 的 Python 3.10～3.12。Windows 下执行：
 
 ```powershell
 cd dj_audio_controller
@@ -74,39 +67,35 @@ py -m venv .venv
 .\.venv\Scripts\python app.py
 ```
 
-选择 XIAO 对应的 COM 口并点击 **CONNECT DEVICE**，在 **AUDIO OUTPUT** 选择扬声器或耳机，通过 **LOAD TRACK** 加载音轨后点击 **PLAY**。需要电机控制音频时勾选 **Scratch with motor**；连接按钮可再次点击以断开。取消勾选 **Use hardware sliders** 可单独试用界面推子。同一 COM 口通常不能同时被串口监视器和本程序占用。
+选择 XIAO 的 COM 口并点击 **CONNECT**，选择音频输出，在 Deck A/B 加载歌曲并点击 **PLAY**，再选择要控制的 Deck。上位机和串口监视器通常不能同时打开同一 COM 口。
 
-## 电机控制与当前状态
+如需检查 USB 写入，请先断开上位机串口，再运行 `python tools\check_cdc.py COM162`，将端口替换为实际 XIAO 端口。该 PING 检查不发送电机命令，只验证 USB 通信。
 
-默认固件使用 500 kbit/s、ID `M`，上电等待至少 1.5 秒并收到 `0x24D` 反馈后，尝试切换速度闭环并持续发送 **4 rad/s** 目标；电机板必须开启反馈。修改目标或关闭自动运行可编辑 `dj_controller_firmware/include/config.h` 并重新烧录。CAN 发送成功和界面本地 `armed` 均不证明电机板已执行命令。
-
-可选的 **Scratch with motor** 以电机实测速度控制音频方向与基础速率，速度滑杆额外提供 0.5～1.5 倍倍率；滑杆居中且电机为 4 rad/s 时约为 1 倍速。电机停止或反馈超时会平滑静音，取消勾选恢复普通播放。上位机的参考速度和平滑时间在 `dj_audio_controller/settings.py`。此功能尚无触摸检测，反馈抖动可能造成音频抖动或噪音。
-
-CAN 命令帧和电机手感模式切换仍需实机验证。电机板可能上电默认使能。详见[固件配置](dj_controller_firmware/README.zh-CN.md)和[上位机操作](dj_audio_controller/README.zh-CN.md)。
-
-## 测试
+## 测试和工程结构
 
 ```powershell
 cd dj_audio_controller
 .\.venv\Scripts\python -m unittest discover -s tests -v
 ```
 
-固件目录的 `tests/` 包含主机端模拟 CAN 测试。模拟测试不能替代 Zephyr 编译和电机实物测试。
-
-## 项目结构
+固件目录也包含主机侧协议和 USB 接收测试。模拟测试不能替代固件编译和实机验证。
 
 ```text
-dj_controller_firmware/   STM32C5 固件、配置和 CAN 测试
-  include/                ADC 通道与电机配置
-  src/                    ADC、电机 CAN 和 USB 串口逻辑
-  zephyr/                 Zephyr 构建配置
-dj_audio_controller/      Python 界面、串口和音频引擎
-  settings.py             电机反馈控速的参考速度与平滑参数
-  tests/                  音频与协议测试
+dj_controller_firmware/   XIAO ADC、CAN 和 USB CDC 固件
+  include/                通道和电机配置
+  src/                    ADC、电机和 USB 分层实现
+  zephyr/                 Zephyr 配置及设备树覆盖
+  tests/                  主机侧固件测试
+dj_audio_controller/      Python 上位机及音频处理
+  app.py                  界面和设备集成
+  audio_engine.py         双音轨播放、混音和 Jog 处理
+  controls.py             滑轨软接管与电机心跳
+  protocol.py             遥测数据解析
+  serial_link.py          USB 串口连接
+  widgets.py              波形、电平条和控件
+  settings.py             校准和行为参数
+  tools/                  不驱动电机的 USB 诊断工具
+  tests/                  音频、协议和控制测试
 ```
 
-详细资料见[固件中文文档](dj_controller_firmware/README.zh-CN.md)和[上位机中文文档](dj_audio_controller/README.zh-CN.md)。
-
-## 后续工作
-
-先排查并验证 CAN 命令与停止行为，再测量控制到音频输出的延迟、校准推子，并增加唱盘触摸检测，改善刮碟体验。双音轨、交叉推子和脱离电脑的音频硬件可作为后续扩展。
+更多信息参见[固件说明](dj_controller_firmware/README.zh-CN.md)和[上位机说明](dj_audio_controller/README.zh-CN.md)。

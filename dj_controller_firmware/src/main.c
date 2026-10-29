@@ -2,6 +2,7 @@
 #include "config.h"
 #include "motor.h"
 #include "motor_autorun.h"
+#include "usb_rx.h"
 #include <stdint.h>
 #include <string.h>
 #include <zephyr/device.h>
@@ -15,31 +16,24 @@ static const struct device *const console = DEVICE_DT_GET(DT_CHOSEN(zephyr_conso
 /* CDC: existing commands plus direct SimpleFOC commands such as MC1. */
 static void poll_commands(void)
 {
-    static char line[40];
-    static size_t length;
-    static bool overflow;
-    unsigned char c;
-    if (!device_is_ready(console)) return;
-    while (uart_poll_in(console, &c) == 0) {
-        if (c == '\n') {
-            line[length] = 0;
-            if (!overflow) {
-                if (!strcmp(line, "STOP") || !strcmp(line, "ME0")) motor_autorun_cancel();
-                int result = motor_command(line);
-#if MOTOR_PROTOCOL == MOTOR_PROTOCOL_SIMPLEFOC
-                if (line[0] == MOTOR_SIMPLEFOC_ID && strcmp(line, "MONITOR")) {
-                    /* An ACK is a CAN transmission result, not application acceptance. */
-                    printk("{\"v\":1,\"type\":\"can_result\",\"id\":%d,\"error\":%d}\n",
-                           MOTOR_SIMPLEFOC_ID, result);
-                }
-#endif
-                (void)result;
-            }
-            length = 0; overflow = false;
-        } else if (c != '\r') {
-            if (length + 1 < sizeof(line)) line[length++] = c;
-            else overflow = true;
+    char line[USB_COMMAND_MAX];
+    /* Bound the work so serial bursts cannot starve sampling or the watchdog. */
+    for (int count = 0; count < 8 && usb_rx_get(line); ++count) {
+        if (!strcmp(line, "PING")) {
+            /* A non-motor diagnostic for verifying both USB directions. */
+            printk("{\"v\":1,\"type\":\"pong\"}\n");
+            continue;
         }
+        if (!strcmp(line, "STOP") || !strcmp(line, "ME0")) motor_autorun_cancel();
+        int result = motor_command(line);
+#if MOTOR_PROTOCOL == MOTOR_PROTOCOL_SIMPLEFOC
+        if (line[0] == MOTOR_SIMPLEFOC_ID && strcmp(line, "MONITOR")) {
+            /* CAN ACK means transmission, not motor-side execution. */
+            printk("{\"v\":1,\"type\":\"can_result\",\"id\":%d,\"error\":%d}\n",
+                   MOTOR_SIMPLEFOC_ID, result);
+        }
+#endif
+        (void)result;
     }
 }
 
@@ -62,6 +56,8 @@ int main(void)
 {
     int32_t values[8];
     int64_t next_sample = 0, next_motor = 0;
+    int rx_error = usb_rx_init(console);
+    if (rx_error) printk("USB command RX init failed: %d\n", rx_error);
     motor_init();
     motor_autorun_init();
     while (1) {
