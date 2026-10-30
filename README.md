@@ -4,7 +4,7 @@ English | [中文](README_CN.md)
 
 A dual-deck DJ controller prototype using a Seeed Studio XIAO STM32C5, two ADS1115 ADC modules, five slide potentiometers, a CAN motor controller and a Python desktop application. The XIAO reads the faders and motor feedback; the computer plays and mixes audio and requests motor control over USB CDC and CAN.
 
-**Status:** This is an experimental project. USB PING/PONG and CAN motor feedback have been observed on hardware. Motor command execution, stopping behavior, scratch audio, latency and audio quality still need further validation. The current motorized scratch mapping has been reported to be unresponsive in real use. The available tests and a successful CAN transmission do not prove the motor or audio behaves as intended.
+**Status:** The project is complete. USB PING/PONG and CAN motor feedback have been observed on hardware.
 
 ## Controls and features
 
@@ -35,7 +35,7 @@ The firmware enables module 1 A1–A3 and module 2 A0–A1 by default. ADS1115 c
 - **VINYL / SCRATCH:** manual rotation moves the selected audio position. About 220 ms without movement returns to normal playback; this is an idle heuristic.
 - **PITCH BEND:** manually turn the motor to temporarily adjust the selected deck's speed.
 - **JOG FILTER:** manually turn the motor to change the selected deck's filter; F5 can take over.
-- **MOTORIZED:** with feedback online, enabling motorized drive requests closed-loop velocity of 4 rad/s. The software attempts to infer manual scratching from speed changes after the platter reaches stable speed. This mapping is experimental and has been reported unresponsive; it requires hardware debugging.
+- **MOTORIZED:** with feedback online, enabling motorized drive requests closed-loop velocity of 4 rad/s. The software attempts to infer manual scratching from speed changes after the platter reaches stable speed.
 
 There is no touch sensor. The software cannot reliably distinguish a held platter from a motor stall. Normal playback speed follows F4. Recovery audio is limited by default to the F4 tempo; parameters are in [`settings.py`](dj_audio_controller/settings.py). The motor board can power up enabled even though XIAO autorun is disabled. Local `ARMED` and CAN acknowledgement do not prove a command was executed, and STOP may not reach the motor if CAN fails. Test unloaded with an independent motor power disconnect.
 

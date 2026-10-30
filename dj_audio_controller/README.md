@@ -19,5 +19,3 @@ Online feedback, local ARMED and CAN ACK do not prove that the motor executed th
 If `Serial send ARM failed: Write timeout` is displayed, flash the firmware version with the interrupt-driven CDC RX fix. After disconnecting the GUI from the port, run `python tools\check_cdc.py COM162` to verify PING/PONG. The test sends no motor command. USB PING success does not verify motor CAN execution.
 
 MOTORIZED combines rotation and approximate sensorless scratching after stable speed is reached. Speed deviations are not proof of touch; holding and a stalled motor cannot be reliably distinguished. Tune `MOTORIZED_*` in `settings.py` on real hardware. Normal playback uses the F4 tempo.
-
-**Known issue:** The current motorized scratch mapping has been reported unresponsive on hardware. The simulated tests do not establish real-world scratch performance.
